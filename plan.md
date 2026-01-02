@@ -11,7 +11,7 @@
 - [x] Implement `git tasks ready` - list pending tasks (no blockers)
 - [x] Add --after flag to `git tasks add` for dependencies
 - [x] Implement `git tasks pr` - export markdown for PR description
-- [ ] Add --json flag to all commands
-- [ ] Block edit/delete when ZAGI_AGENT is set
+- [x] Add --json flag to all commands
+- [x] Block edit/delete when ZAGI_AGENT is set
 - [x] Add routing in main.zig for tasks command
-- [ ] Write integration tests in test/src/tasks.test.ts
+- [x] Write integration tests in test/src/tasks.test.ts
