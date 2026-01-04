@@ -3,7 +3,24 @@ const git = @import("git.zig");
 const c = git.c;
 
 pub const help =
-    \\usage: zagi agent [options]
+    \\usage: zagi agent <command> [options]
+    \\
+    \\AI agent for automated task execution.
+    \\
+    \\Commands:
+    \\  run      Execute RALPH loop to complete tasks
+    \\  plan     Start planning session to create tasks
+    \\
+    \\Run 'zagi agent <command> --help' for command-specific options.
+    \\
+    \\Environment:
+    \\  ZAGI_AGENT           Executor: claude (default) or opencode
+    \\  ZAGI_AGENT_CMD       Custom command override (e.g., "aider --yes")
+    \\
+;
+
+const run_help =
+    \\usage: zagi agent run [options]
     \\
     \\Execute RALPH loop to automatically complete tasks.
     \\
@@ -15,15 +32,27 @@ pub const help =
     \\  --max-tasks <n>      Stop after n tasks (safety limit)
     \\  -h, --help           Show this help message
     \\
-    \\Environment:
-    \\  ZAGI_AGENT           Executor: claude (default) or opencode
-    \\  ZAGI_AGENT_CMD       Custom command override (e.g., "aider --yes")
+    \\Examples:
+    \\  zagi agent run
+    \\  zagi agent run --once
+    \\  zagi agent run --dry-run
+    \\  ZAGI_AGENT=opencode zagi agent run
+    \\
+;
+
+const plan_help =
+    \\usage: zagi agent plan [options] <description>
+    \\
+    \\Start a planning session to create detailed tasks.
+    \\
+    \\Options:
+    \\  --model <model>      Model to use (optional, uses executor default)
+    \\  --dry-run            Show prompt without executing
+    \\  -h, --help           Show this help message
     \\
     \\Examples:
-    \\  zagi agent
-    \\  ZAGI_AGENT=opencode zagi agent
-    \\  ZAGI_AGENT_CMD="aider --yes" zagi agent
-    \\  zagi agent --once --dry-run
+    \\  zagi agent plan "Add user authentication"
+    \\  zagi agent plan --dry-run "Refactor database layer"
     \\
 ;
 
@@ -37,16 +66,214 @@ pub const Error = git.Error || error{
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
+
+    // Need at least "zagi agent <subcommand>"
+    if (args.len < 3) {
+        stdout.print("{s}", .{help}) catch {};
+        return;
+    }
+
+    const subcommand = std.mem.sliceTo(args[2], 0);
+
+    if (std.mem.eql(u8, subcommand, "run")) {
+        return runRun(allocator, args);
+    } else if (std.mem.eql(u8, subcommand, "plan")) {
+        return runPlan(allocator, args);
+    } else if (std.mem.eql(u8, subcommand, "-h") or std.mem.eql(u8, subcommand, "--help")) {
+        stdout.print("{s}", .{help}) catch {};
+        return;
+    } else {
+        stdout.print("error: unknown subcommand '{s}'\n\n{s}", .{ subcommand, help }) catch {};
+        return Error.InvalidCommand;
+    }
+}
+
+// Planning prompt - guides agent to create detailed, engineer-ready plans
+const planning_prompt =
+    \\You are a planning agent. Your job is to create a detailed implementation plan.
+    \\
+    \\PROJECT GOAL: {s}
+    \\
+    \\INSTRUCTIONS:
+    \\1. Read AGENTS.md to understand the project context, conventions, and build commands
+    \\2. Explore the codebase to understand the current architecture
+    \\3. Create a detailed plan that an engineer can follow WITHOUT any external knowledge
+    \\4. Each task must be:
+    \\   - Fully self-contained and independently completable
+    \\   - Have clear acceptance criteria (what tests to run, what to verify)
+    \\   - Be small enough to complete in one session
+    \\
+    \\CREATING TASKS:
+    \\Once your plan is ready, create tasks using:
+    \\  ./zig-out/bin/zagi tasks add "<task description with acceptance criteria>"
+    \\
+    \\Example task format:
+    \\  "Implement login API endpoint - add POST /api/login that validates credentials and returns JWT. Test: curl -X POST with valid/invalid creds"
+    \\
+    \\RULES:
+    \\- Create tasks in chronological order (dependencies first)
+    \\- Each task should include how to verify it works
+    \\- Include test requirements in task descriptions
+    \\- NEVER git push (only commit)
+    \\- After creating all tasks, run: ./zig-out/bin/zagi tasks list
+    \\
+;
+
+fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stderr = std.fs.File.stderr().deprecatedWriter();
+
+    var model: ?[]const u8 = null;
+    var dry_run = false;
+    var description: ?[]const u8 = null;
+
+    var i: usize = 3; // Start after "zagi agent plan"
+    while (i < args.len) {
+        const arg = std.mem.sliceTo(args[i], 0);
+
+        if (std.mem.eql(u8, arg, "--model")) {
+            i += 1;
+            if (i >= args.len) {
+                stdout.print("error: --model requires a model name\n", .{}) catch {};
+                return Error.InvalidCommand;
+            }
+            model = std.mem.sliceTo(args[i], 0);
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            dry_run = true;
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            stdout.print("{s}", .{plan_help}) catch {};
+            return;
+        } else if (arg[0] == '-') {
+            stdout.print("error: unknown option '{s}'\n", .{arg}) catch {};
+            return Error.InvalidCommand;
+        } else {
+            description = arg;
+        }
+        i += 1;
+    }
+
+    if (description == null) {
+        stdout.print("error: description required\n\n{s}", .{plan_help}) catch {};
+        return Error.InvalidCommand;
+    }
+
+    // Check ZAGI_AGENT_CMD for custom command override
+    const agent_cmd = std.posix.getenv("ZAGI_AGENT_CMD");
+    const executor = std.posix.getenv("ZAGI_AGENT") orelse "claude";
+
+    // Create the planning prompt
+    const prompt = std.fmt.allocPrint(allocator, planning_prompt, .{description.?}) catch return Error.OutOfMemory;
+    defer allocator.free(prompt);
+
+    if (dry_run) {
+        stdout.print("=== Planning Session (dry-run) ===\n\n", .{}) catch {};
+        stdout.print("Goal: {s}\n\n", .{description.?}) catch {};
+        stdout.print("Would execute:\n", .{}) catch {};
+        if (agent_cmd) |cmd| {
+            stdout.print("  {s} \"<planning prompt>\"\n", .{cmd}) catch {};
+        } else if (std.mem.eql(u8, executor, "claude")) {
+            stdout.print("  claude -p \"<planning prompt>\"\n", .{}) catch {};
+        } else if (std.mem.eql(u8, executor, "opencode")) {
+            stdout.print("  opencode run \"<planning prompt>\"\n", .{}) catch {};
+        } else {
+            stdout.print("  {s} \"<planning prompt>\"\n", .{executor}) catch {};
+        }
+        stdout.print("\n--- Prompt Preview ---\n{s}\n", .{prompt}) catch {};
+        return;
+    }
+
+    // Open log file
+    var log_file: ?std.fs.File = std.fs.cwd().createFile("agent.log", .{ .truncate = false }) catch null;
+    if (log_file) |*f| f.seekFromEnd(0) catch {};
+    defer if (log_file) |f| f.close();
+
+    const logToFile = struct {
+        fn write(alloc: std.mem.Allocator, file: ?std.fs.File, comptime fmt: []const u8, log_args: anytype) void {
+            if (file) |f| {
+                const msg = std.fmt.allocPrint(alloc, fmt, log_args) catch return;
+                defer alloc.free(msg);
+                f.writeAll(msg) catch {};
+            }
+        }
+    }.write;
+
+    stdout.print("=== Starting Planning Session ===\n", .{}) catch {};
+    stdout.print("Goal: {s}\n", .{description.?}) catch {};
+    stdout.print("Executor: {s}\n\n", .{executor}) catch {};
+    logToFile(allocator, log_file, "=== Planning session started: {s} ===\n", .{description.?});
+
+    // Build and execute command
+    var runner_args = std.ArrayList([]const u8){};
+    defer runner_args.deinit(allocator);
+
+    if (agent_cmd) |cmd| {
+        var parts = std.mem.splitScalar(u8, cmd, ' ');
+        while (parts.next()) |part| {
+            if (part.len > 0) runner_args.append(allocator, part) catch {};
+        }
+        runner_args.append(allocator, prompt) catch {};
+    } else if (std.mem.eql(u8, executor, "claude")) {
+        runner_args.append(allocator, "claude") catch {};
+        runner_args.append(allocator, "-p") catch {};
+        if (model) |m| {
+            runner_args.append(allocator, "--model") catch {};
+            runner_args.append(allocator, m) catch {};
+        }
+        runner_args.append(allocator, prompt) catch {};
+    } else if (std.mem.eql(u8, executor, "opencode")) {
+        runner_args.append(allocator, "opencode") catch {};
+        runner_args.append(allocator, "run") catch {};
+        if (model) |m| {
+            runner_args.append(allocator, "-m") catch {};
+            runner_args.append(allocator, m) catch {};
+        }
+        runner_args.append(allocator, prompt) catch {};
+    } else {
+        var parts = std.mem.splitScalar(u8, executor, ' ');
+        while (parts.next()) |part| {
+            if (part.len > 0) runner_args.append(allocator, part) catch {};
+        }
+        runner_args.append(allocator, prompt) catch {};
+    }
+
+    var child = std.process.Child.init(runner_args.items, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    const term = child.spawnAndWait() catch |err| {
+        stderr.print("Error executing agent: {s}\n", .{@errorName(err)}) catch {};
+        return Error.SpawnFailed;
+    };
+
+    const success = switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+
+    if (success) {
+        stdout.print("\n=== Planning session completed ===\n", .{}) catch {};
+        stdout.print("Run 'zagi tasks list' to see created tasks\n", .{}) catch {};
+        stdout.print("Run 'zagi agent run' to execute tasks\n", .{}) catch {};
+        logToFile(allocator, log_file, "=== Planning session completed ===\n\n", .{});
+    } else {
+        stdout.print("\n=== Planning session failed ===\n", .{}) catch {};
+        logToFile(allocator, log_file, "=== Planning session failed ===\n\n", .{});
+    }
+}
+
+fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
     const stderr = std.fs.File.stderr().deprecatedWriter();
 
     // Parse command options
     var model: ?[]const u8 = null;
     var once = false;
     var dry_run = false;
-    var delay: u32 = 2; // default 2 seconds
+    var delay: u32 = 2;
     var max_tasks: ?u32 = null;
 
-    var i: usize = 2; // Start after "zagi agent"
+    var i: usize = 3; // Start after "zagi agent run"
     while (i < args.len) {
         const arg = std.mem.sliceTo(args[i], 0);
 
@@ -84,7 +311,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
                 return Error.InvalidCommand;
             };
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            stdout.print("{s}", .{help}) catch {};
+            stdout.print("{s}", .{run_help}) catch {};
             return;
         } else {
             stdout.print("error: unknown option '{s}'\n", .{arg}) catch {};
@@ -93,14 +320,8 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         i += 1;
     }
 
-    // Check ZAGI_AGENT_CMD for custom command override
     const agent_cmd = std.posix.getenv("ZAGI_AGENT_CMD");
-
-    // Get executor from ZAGI_AGENT env var, default to "claude"
     const executor = std.posix.getenv("ZAGI_AGENT") orelse "claude";
-
-    // Note: model is only used if explicitly set via --model flag
-    // Executors use their own defaults when model is null
 
     // Initialize libgit2
     if (c.git_libgit2_init() < 0) {
@@ -116,15 +337,10 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     defer c.git_repository_free(repo);
 
     // Open log file for append
-    var log_file: ?std.fs.File = std.fs.cwd().createFile("agent.log", .{
-        .truncate = false,
-    }) catch null;
-    if (log_file) |*f| {
-        f.seekFromEnd(0) catch {};
-    }
+    var log_file: ?std.fs.File = std.fs.cwd().createFile("agent.log", .{ .truncate = false }) catch null;
+    if (log_file) |*f| f.seekFromEnd(0) catch {};
     defer if (log_file) |f| f.close();
 
-    // Simple log function - writes to file using allocator for formatting
     const logToFile = struct {
         fn write(alloc: std.mem.Allocator, file: ?std.fs.File, comptime fmt: []const u8, log_args: anytype) void {
             if (file) |f| {
@@ -151,7 +367,6 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     stdout.print("\n\n", .{}) catch {};
 
     while (true) {
-        // Check max_tasks limit
         if (max_tasks) |max| {
             if (tasks_completed >= max) {
                 stdout.print("Reached maximum task limit ({})\n", .{max}) catch {};
@@ -159,7 +374,6 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             }
         }
 
-        // Get pending tasks by calling zagi tasks list --json
         const pending = getPendingTasks(allocator) catch {
             stderr.print("error: failed to load tasks\n", .{}) catch {};
             return Error.TaskLoadFailed;
@@ -176,7 +390,6 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             break;
         }
 
-        // Filter out tasks that have failed too many times
         var next_task: ?PendingTask = null;
         for (pending.tasks) |task| {
             const failure_count = consecutive_failures.get(task.id) orelse 0;
@@ -210,18 +423,15 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             stdout.print("\n", .{}) catch {};
             tasks_completed += 1;
         } else {
-            // Execute the task
             const success = executeTask(allocator, executor, model, agent_cmd, task.id, task.content) catch false;
 
             if (success) {
-                // Reset failure count on success - need to dupe key since task.id will be freed
                 const key = allocator.dupe(u8, task.id) catch task.id;
                 consecutive_failures.put(key, 0) catch {};
                 tasks_completed += 1;
                 stdout.print("Task completed successfully\n\n", .{}) catch {};
                 logToFile(allocator, log_file, "Task {s} completed successfully\n", .{task.id});
             } else {
-                // Increment failure count - need to dupe key since task.id will be freed
                 const current_failures = consecutive_failures.get(task.id) orelse 0;
                 const new_failures = current_failures + 1;
                 const key = allocator.dupe(u8, task.id) catch task.id;
@@ -236,13 +446,11 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             }
         }
 
-        // If --once flag is set, exit after first task
         if (once) {
             stdout.print("Exiting after one task (--once flag set)\n", .{}) catch {};
             break;
         }
 
-        // Delay between tasks
         if (!dry_run and delay > 0) {
             stdout.print("Waiting {} seconds before next task...\n\n", .{delay}) catch {};
             std.Thread.sleep(delay * std.time.ns_per_s);
@@ -263,7 +471,6 @@ const PendingTasks = struct {
 };
 
 fn getPendingTasks(allocator: std.mem.Allocator) !PendingTasks {
-    // Shell out to zagi tasks list --json
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &.{ "./zig-out/bin/zagi", "tasks", "list", "--json" },
@@ -271,7 +478,6 @@ fn getPendingTasks(allocator: std.mem.Allocator) !PendingTasks {
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    // Parse JSON output
     const parsed = std.json.parseFromSlice(struct {
         tasks: []const struct {
             id: []const u8,
@@ -285,7 +491,6 @@ fn getPendingTasks(allocator: std.mem.Allocator) !PendingTasks {
     };
     defer parsed.deinit();
 
-    // Filter to pending tasks
     var pending = std.ArrayList(PendingTask){};
     for (parsed.value.tasks) |task| {
         if (!std.mem.eql(u8, task.status, "completed")) {
@@ -329,9 +534,7 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]con
     var runner_args = std.ArrayList([]const u8){};
     defer runner_args.deinit(allocator);
 
-    // Build command based on agent_cmd override or executor
     if (agent_cmd) |cmd| {
-        // Custom command from ZAGI_AGENT_CMD - split by spaces
         var parts = std.mem.splitScalar(u8, cmd, ' ');
         while (parts.next()) |part| {
             if (part.len > 0) {
@@ -356,7 +559,6 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]con
         }
         try runner_args.append(allocator, prompt);
     } else {
-        // Custom executor from ZAGI_AGENT - split by spaces
         var parts = std.mem.splitScalar(u8, executor, ' ');
         while (parts.next()) |part| {
             if (part.len > 0) {
@@ -366,8 +568,6 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]con
         try runner_args.append(allocator, prompt);
     }
 
-    // Execute the command with inherited stdio
-    // Note: Child inherits environment from parent, including ZAGI_AGENT if set
     var child = std.process.Child.init(runner_args.items, allocator);
     child.stdin_behavior = .Inherit;
     child.stdout_behavior = .Inherit;

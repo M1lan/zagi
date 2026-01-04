@@ -48,16 +48,6 @@ describe("zagi tasks add", () => {
     expect(result).toContain("Add user authentication system");
   });
 
-  test("creates task with dependency using --after", () => {
-    // First create a task to depend on
-    zagi(["tasks", "add", "Base task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "add", "Dependent task", "--after", "task-001"], { cwd: REPO_DIR });
-
-    expect(result).toMatch(/created: task-\d{3}/);
-    expect(result).toContain("Dependent task");
-  });
-
   test("outputs JSON when --json flag is used", () => {
     const result = zagi(["tasks", "add", "Test task", "--json"], { cwd: REPO_DIR });
 
@@ -67,15 +57,6 @@ describe("zagi tasks add", () => {
     expect(parsed).toHaveProperty("status", "pending");
     expect(parsed).toHaveProperty("created");
     expect(parsed).toHaveProperty("completed", null);
-  });
-
-  test("creates task with dependency in JSON format", () => {
-    zagi(["tasks", "add", "Base task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "add", "Dependent task", "--after", "task-001", "--json"], { cwd: REPO_DIR });
-
-    const parsed = JSON.parse(result.trim());
-    expect(parsed).toHaveProperty("after", "task-001");
   });
 
   test("error for missing content", () => {
@@ -88,12 +69,6 @@ describe("zagi tasks add", () => {
     const result = zagi(["tasks", "add", ""], { cwd: REPO_DIR });
 
     expect(result).toContain("error: task content cannot be empty");
-  });
-
-  test("error for --after without task ID", () => {
-    const result = zagi(["tasks", "add", "Test task", "--after"], { cwd: REPO_DIR });
-
-    expect(result).toContain("error: --after requires a task ID");
   });
 });
 
@@ -126,15 +101,6 @@ describe("zagi tasks list", () => {
     expect(result).toContain("[ ] task-002");
   });
 
-  test("shows task dependencies", () => {
-    zagi(["tasks", "add", "Base task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Dependent task", "--after", "task-001"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "list"], { cwd: REPO_DIR });
-
-    expect(result).toContain("[ ] task-002 (after task-001)");
-  });
-
   test("outputs JSON when --json flag is used", () => {
     zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
 
@@ -149,22 +115,21 @@ describe("zagi tasks list", () => {
   });
 
   test("JSON output includes all task fields", () => {
-    zagi(["tasks", "add", "Base task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Dependent task", "--after", "task-001"], { cwd: REPO_DIR });
+    zagi(["tasks", "add", "First task"], { cwd: REPO_DIR });
+    zagi(["tasks", "add", "Second task"], { cwd: REPO_DIR });
     zagi(["tasks", "done", "task-001"], { cwd: REPO_DIR });
 
     const result = zagi(["tasks", "list", "--json"], { cwd: REPO_DIR });
 
     const parsed = JSON.parse(result.trim());
-    const baseTask = parsed.tasks.find((t: any) => t.id === "task-001");
-    const depTask = parsed.tasks.find((t: any) => t.id === "task-002");
+    const firstTask = parsed.tasks.find((t: any) => t.id === "task-001");
+    const secondTask = parsed.tasks.find((t: any) => t.id === "task-002");
 
-    expect(baseTask).toHaveProperty("status", "completed");
-    expect(baseTask).toHaveProperty("completed");
-    expect(baseTask.completed).not.toBeNull();
+    expect(firstTask).toHaveProperty("status", "completed");
+    expect(firstTask).toHaveProperty("completed");
+    expect(firstTask.completed).not.toBeNull();
 
-    expect(depTask).toHaveProperty("after", "task-001");
-    expect(depTask).toHaveProperty("status", "pending");
+    expect(secondTask).toHaveProperty("status", "pending");
   });
 });
 
@@ -188,15 +153,6 @@ describe("zagi tasks show", () => {
 
     expect(result).toContain("status: completed");
     expect(result).toContain("completed:");
-  });
-
-  test("shows task dependency", () => {
-    zagi(["tasks", "add", "Base task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Dependent task", "--after", "task-001"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "show", "task-002"], { cwd: REPO_DIR });
-
-    expect(result).toContain("depends on: task-001");
   });
 
   test("outputs JSON when --json flag is used", () => {
@@ -265,67 +221,6 @@ describe("zagi tasks done", () => {
   });
 });
 
-describe("zagi tasks ready", () => {
-  test("shows no ready tasks when empty", () => {
-    const result = zagi(["tasks", "ready"], { cwd: REPO_DIR });
-
-    expect(result).toContain("no tasks found");
-  });
-
-  test("shows single ready task", () => {
-    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "ready"], { cwd: REPO_DIR });
-
-    expect(result).toContain("ready: 1 task");
-    expect(result).toContain("[ ] task-001");
-    expect(result).toContain("Test task");
-  });
-
-  test("excludes blocked tasks", () => {
-    zagi(["tasks", "add", "Base task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Dependent task", "--after", "task-001"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Independent task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "ready"], { cwd: REPO_DIR });
-
-    expect(result).toContain("ready: 2 tasks");
-    expect(result).toContain("[ ] task-001");
-    expect(result).toContain("[ ] task-003");
-    expect(result).not.toContain("task-002");
-  });
-
-  test("includes tasks with completed dependencies", () => {
-    zagi(["tasks", "add", "Base task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Dependent task", "--after", "task-001"], { cwd: REPO_DIR });
-    zagi(["tasks", "done", "task-001"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "ready"], { cwd: REPO_DIR });
-
-    expect(result).toContain("ready: 1 task");
-    expect(result).toContain("[ ] task-002");
-    expect(result).toContain("Dependent task");
-  });
-
-  test("excludes completed tasks", () => {
-    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
-    zagi(["tasks", "done", "task-001"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "ready"], { cwd: REPO_DIR });
-
-    expect(result).toContain("no ready tasks");
-  });
-
-  test("handles plural form correctly", () => {
-    zagi(["tasks", "add", "First task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Second task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "ready"], { cwd: REPO_DIR });
-
-    expect(result).toContain("ready: 2 tasks");
-  });
-});
-
 describe("zagi tasks pr", () => {
   test("shows empty state when no tasks", () => {
     const result = zagi(["tasks", "pr"], { cwd: REPO_DIR });
@@ -345,61 +240,26 @@ describe("zagi tasks pr", () => {
     expect(result).toContain("- [x] Test task");
   });
 
-  test("shows ready tasks section", () => {
-    zagi(["tasks", "add", "Ready task"], { cwd: REPO_DIR });
+  test("shows pending tasks section", () => {
+    zagi(["tasks", "add", "Pending task"], { cwd: REPO_DIR });
 
     const result = zagi(["tasks", "pr"], { cwd: REPO_DIR });
 
-    expect(result).toContain("### Ready");
-    expect(result).toContain("- [ ] Ready task");
+    expect(result).toContain("### Pending");
+    expect(result).toContain("- [ ] Pending task");
   });
 
-  test("shows blocked tasks section", () => {
-    zagi(["tasks", "add", "Base task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Blocked task", "--after", "task-001"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "pr"], { cwd: REPO_DIR });
-
-    expect(result).toContain("### Ready");
-    expect(result).toContain("- [ ] Base task");
-    expect(result).toContain("### Blocked");
-    expect(result).toContain("- [ ] Blocked task (after task-001)");
-  });
-
-  test("shows dependencies in completed tasks", () => {
-    zagi(["tasks", "add", "Base task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Dependent task", "--after", "task-001"], { cwd: REPO_DIR });
-    zagi(["tasks", "done", "task-001"], { cwd: REPO_DIR });
-    zagi(["tasks", "done", "task-002"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "pr"], { cwd: REPO_DIR });
-
-    expect(result).toContain("- [x] Base task");
-    expect(result).toContain("- [x] Dependent task (after task-001)");
-  });
-
-  test("comprehensive mixed state", () => {
-    // Create complex task hierarchy
-    zagi(["tasks", "add", "Foundation"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Build on foundation", "--after", "task-001"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Independent work"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Final step", "--after", "task-002"], { cwd: REPO_DIR });
-
-    // Complete foundation
+  test("shows both completed and pending", () => {
+    zagi(["tasks", "add", "First task"], { cwd: REPO_DIR });
+    zagi(["tasks", "add", "Second task"], { cwd: REPO_DIR });
     zagi(["tasks", "done", "task-001"], { cwd: REPO_DIR });
 
     const result = zagi(["tasks", "pr"], { cwd: REPO_DIR });
 
-    // Should have all sections
     expect(result).toContain("### Completed");
-    expect(result).toContain("- [x] Foundation");
-
-    expect(result).toContain("### Ready");
-    expect(result).toContain("- [ ] Build on foundation");
-    expect(result).toContain("- [ ] Independent work");
-
-    expect(result).toContain("### Blocked");
-    expect(result).toContain("- [ ] Final step (after task-002)");
+    expect(result).toContain("- [x] First task");
+    expect(result).toContain("### Pending");
+    expect(result).toContain("- [ ] Second task");
   });
 });
 
@@ -507,6 +367,67 @@ describe("performance", () => {
     expect(secondList).toContain("Persistent task");
     expect(secondList).toContain("Another task");
     expect(secondList).toContain("tasks: 2 total");
+  });
+});
+
+describe("zagi agent", () => {
+  test("shows help when no subcommand", () => {
+    const result = zagi(["agent"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: zagi agent <command>");
+    expect(result).toContain("Commands:");
+    expect(result).toContain("run");
+    expect(result).toContain("plan");
+  });
+
+  test("agent --help shows help", () => {
+    const result = zagi(["agent", "--help"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: zagi agent <command>");
+  });
+
+  test("agent run --help shows run help", () => {
+    const result = zagi(["agent", "run", "--help"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: zagi agent run");
+    expect(result).toContain("--once");
+    expect(result).toContain("--dry-run");
+    expect(result).toContain("--max-tasks");
+  });
+
+  test("agent plan --help shows plan help", () => {
+    const result = zagi(["agent", "plan", "--help"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: zagi agent plan");
+    expect(result).toContain("<description>");
+    expect(result).toContain("--dry-run");
+  });
+
+  test("agent plan --dry-run shows planning prompt", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Add user auth"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Planning Session (dry-run)");
+    expect(result).toContain("Goal: Add user auth");
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("claude -p");
+    expect(result).toContain("Prompt Preview");
+    expect(result).toContain("PROJECT GOAL: Add user auth");
+  });
+
+  test("agent plan requires description", () => {
+    const result = zagi(["agent", "plan"], { cwd: REPO_DIR });
+
+    expect(result).toContain("error: description required");
+  });
+
+  test("agent unknown subcommand shows error", () => {
+    const result = zagi(["agent", "invalid"], { cwd: REPO_DIR });
+
+    expect(result).toContain("error: unknown subcommand 'invalid'");
+    expect(result).toContain("usage: zagi agent <command>");
   });
 });
 
