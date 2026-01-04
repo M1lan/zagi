@@ -15,24 +15,19 @@ pub const help =
     \\  edit <id> <content>     Edit task content
     \\  delete <id>             Delete a task
     \\  done <id>               Mark task as complete
-    \\  ready                   List tasks ready to work on (no blockers)
     \\  pr                      Export tasks as markdown for PR description
-    \\  run                     Execute RALPH loop to automatically complete tasks
     \\
     \\Options:
-    \\  --after <id>           Add task dependency (use with 'add')
     \\  --json                 Output in JSON format
     \\  -h, --help             Show this help message
     \\
     \\Examples:
     \\  git tasks add "Fix authentication bug"
-    \\  git tasks add "Add tests" --after task-001
     \\  git tasks list
     \\  git tasks show task-001
     \\  git tasks edit task-001 "Fix authentication and authorization bug"
     \\  git tasks delete task-001
     \\  git tasks done task-001
-    \\  git tasks ready
     \\  git tasks pr
     \\
 ;
@@ -59,7 +54,6 @@ const Task = struct {
     status: []const u8 = "pending",
     created: i64,
     completed: ?i64 = null,
-    after: ?[]const u8 = null, // ID of task this depends on
 
     const Self = @This();
 
@@ -67,9 +61,6 @@ const Task = struct {
         allocator.free(self.id);
         allocator.free(self.content);
         allocator.free(self.status);
-        if (self.after) |after_id| {
-            allocator.free(after_id);
-        }
     }
 };
 
@@ -115,13 +106,12 @@ const TaskList = struct {
         const next_id_line = std.fmt.allocPrint(allocator, "next_id:{}", .{self.next_id}) catch return Error.OutOfMemory;
         lines.append(allocator, next_id_line) catch return Error.OutOfMemory;
 
-        // Task lines: id|content|status|created|completed|after
+        // Task lines: id|content|status|created|completed
         for (self.tasks.items) |task| {
             const completed_str = if (task.completed) |comp_time| std.fmt.allocPrint(allocator, "{}", .{comp_time}) catch return Error.OutOfMemory else allocator.dupe(u8, "") catch return Error.OutOfMemory;
-            const after_str = if (task.after) |a| a else "";
 
-            const task_line = std.fmt.allocPrint(allocator, "task:{s}|{s}|{s}|{}|{s}|{s}",
-                .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+            const task_line = std.fmt.allocPrint(allocator, "task:{s}|{s}|{s}|{}|{s}",
+                .{ task.id, task.content, task.status, task.created, completed_str }
             ) catch return Error.OutOfMemory;
             lines.append(allocator, task_line) catch return Error.OutOfMemory;
 
@@ -213,11 +203,8 @@ const TaskList = struct {
                         task.completed = std.fmt.parseInt(i64, completed, 10) catch null;
                     }
                 }
-                if (parts.next()) |after| {
-                    if (after.len > 0) {
-                        task.after = allocator.dupe(u8, after) catch return Error.AllocationError;
-                    }
-                }
+                // Skip any remaining fields (legacy 'after' field for backwards compatibility)
+                _ = parts.next();
 
                 task_list.tasks.append(allocator, task) catch {
                     allocator.free(task.id);
@@ -423,12 +410,8 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         try runDelete(allocator, args, repo);
     } else if (std.mem.eql(u8, subcommand, "done")) {
         try runDone(allocator, args, repo);
-    } else if (std.mem.eql(u8, subcommand, "ready")) {
-        try runReady(allocator, args, repo);
     } else if (std.mem.eql(u8, subcommand, "pr")) {
         try runPr(allocator, args, repo);
-    } else if (std.mem.eql(u8, subcommand, "run")) {
-        try runRun(allocator, args, repo);
     } else {
         stdout.print("error: unknown command '{s}'\n\n{s}", .{ subcommand, help }) catch {};
         return Error.InvalidCommand;
@@ -444,24 +427,15 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
         return Error.MissingTaskContent;
     }
 
-    // Parse arguments for content, --after flag, and --json flag
+    // Parse arguments for content and --json flag
     var content: ?[]const u8 = null;
-    var after_id: ?[]const u8 = null;
     var use_json = false;
     var i: usize = 3; // Start after "git tasks add"
 
     while (i < args.len) {
         const arg = std.mem.sliceTo(args[i], 0);
 
-        if (std.mem.eql(u8, arg, "--after")) {
-            // Next argument should be the task ID
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --after requires a task ID\n", .{}) catch {};
-                return Error.InvalidTaskId;
-            }
-            after_id = std.mem.sliceTo(args[i], 0);
-        } else if (std.mem.eql(u8, arg, "--json")) {
+        if (std.mem.eql(u8, arg, "--json")) {
             use_json = true;
         } else if (content == null) {
             // First non-flag argument is the content
@@ -511,7 +485,6 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
         .content = task_content,
         .status = task_status,
         .created = now,
-        .after = if (after_id) |aid| allocator.dupe(u8, aid) catch return Error.AllocationError else null,
     };
 
     // Add task to list - after this, task_list owns the allocations
@@ -532,12 +505,9 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
     // Output confirmation
     if (use_json) {
         // Manually construct JSON output
-        const after_str = if (after_id) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
-        defer allocator.free(after_str);
-
         const json_output = try std.fmt.allocPrint(allocator,
-            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"pending\",\"created\":{},\"completed\":null,\"after\":{s}}}",
-            .{ task_id, content.?, now, after_str }
+            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"pending\",\"created\":{},\"completed\":null}}",
+            .{ task_id, content.?, now }
         );
         defer allocator.free(json_output);
 
@@ -575,7 +545,6 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
             status: []const u8,
             created: i64,
             completed: ?i64,
-            after: ?[]const u8,
         };
 
 
@@ -590,7 +559,6 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
                 .status = task.status,
                 .created = task.created,
                 .completed = task.completed,
-                .after = task.after,
             }) catch return Error.AllocationError;
         }
 
@@ -606,12 +574,9 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
             const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
             defer allocator.free(completed_str);
 
-            const after_str = if (task.after) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
-            defer allocator.free(after_str);
-
             const task_json = try std.fmt.allocPrint(allocator,
-                "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s},\"after\":{s}}}",
-                .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+                "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
+                .{ task.id, task.content, task.status, task.created, completed_str }
             );
             defer allocator.free(task_json);
 
@@ -647,15 +612,8 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
     // List all tasks with compact format
     for (task_list.tasks.items) |task| {
         const status_mark = if (std.mem.eql(u8, task.status, "completed")) "✓" else " ";
-
-        // Show dependency if present
-        if (task.after) |after_id| {
-            stdout.print("[{s}] {s} (after {s})\n  {s}\n",
-                .{ status_mark, task.id, after_id, task.content }) catch {};
-        } else {
-            stdout.print("[{s}] {s}\n  {s}\n",
-                .{ status_mark, task.id, task.content }) catch {};
-        }
+        stdout.print("[{s}] {s}\n  {s}\n",
+            .{ status_mark, task.id, task.content }) catch {};
     }
 }
 
@@ -734,12 +692,9 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
         const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
         defer allocator.free(completed_str);
 
-        const after_str = if (task.after) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
-        defer allocator.free(after_str);
-
         const json_output = try std.fmt.allocPrint(allocator,
-            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s},\"after\":{s}}}",
-            .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
+            .{ task.id, task.content, task.status, task.created, completed_str }
         );
         defer allocator.free(json_output);
 
@@ -766,10 +721,6 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 
     if (completed_time) |ct| {
         stdout.print("completed: {s}\n", .{ct}) catch {};
-    }
-
-    if (task.after) |after_id| {
-        stdout.print("depends on: {s}\n", .{after_id}) catch {};
     }
 }
 
@@ -854,41 +805,12 @@ fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposito
         return;
     }
 
-    // Build a map of task ID -> completion status for dependency checking
-    var completed_tasks = std.HashMap([]const u8, bool, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
-    defer completed_tasks.deinit();
-
-    for (task_list.tasks.items) |task| {
-        const is_completed = std.mem.eql(u8, task.status, "completed");
-        completed_tasks.put(task.id, is_completed) catch return Error.AllocationError;
-    }
-
-    // Find tasks that are ready (pending and no unmet dependencies)
+    // Find pending tasks (all pending tasks are ready without dependencies)
     var ready_tasks = std.ArrayList(Task){};
     defer ready_tasks.deinit(allocator);
 
     for (task_list.tasks.items) |task| {
-        // Skip completed tasks
-        if (std.mem.eql(u8, task.status, "completed")) {
-            continue;
-        }
-
-        // Check if this task is ready
-        var is_ready = true;
-
-        // If task has a dependency, check if it's completed
-        if (task.after) |dependency_id| {
-            if (completed_tasks.get(dependency_id)) |is_dep_completed| {
-                if (!is_dep_completed) {
-                    is_ready = false;
-                }
-            } else {
-                // Dependency doesn't exist - this is an error state, but we'll treat it as not ready
-                is_ready = false;
-            }
-        }
-
-        if (is_ready) {
+        if (!std.mem.eql(u8, task.status, "completed")) {
             ready_tasks.append(allocator, task) catch return Error.AllocationError;
         }
     }
@@ -898,7 +820,7 @@ fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposito
         if (use_json) {
             stdout.print("[]\n", .{}) catch {};
         } else {
-            stdout.print("no ready tasks (all tasks are either completed or waiting on dependencies)\n", .{}) catch {};
+            stdout.print("no pending tasks\n", .{}) catch {};
         }
         return;
     }
@@ -910,12 +832,9 @@ fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposito
             const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
             defer allocator.free(completed_str);
 
-            const after_str = if (task.after) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
-            defer allocator.free(after_str);
-
             const json_output = try std.fmt.allocPrint(allocator,
-                "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s},\"after\":{s}}}",
-                .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+                "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
+                .{ task.id, task.content, task.status, task.created, completed_str }
             );
             defer allocator.free(json_output);
 
@@ -953,22 +872,17 @@ fn runPr(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository)
         return;
     }
 
-    // Separate tasks by status and build dependency map
+    // Separate tasks by status
     var completed_tasks = std.ArrayList(Task){};
     var pending_tasks = std.ArrayList(Task){};
     defer completed_tasks.deinit(allocator);
     defer pending_tasks.deinit(allocator);
 
-    var completed_map = std.HashMap([]const u8, bool, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
-    defer completed_map.deinit();
-
     for (task_list.tasks.items) |task| {
         if (std.mem.eql(u8, task.status, "completed")) {
             completed_tasks.append(allocator, task) catch return Error.AllocationError;
-            completed_map.put(task.id, true) catch return Error.AllocationError;
         } else {
             pending_tasks.append(allocator, task) catch return Error.AllocationError;
-            completed_map.put(task.id, false) catch return Error.AllocationError;
         }
     }
 
@@ -979,65 +893,18 @@ fn runPr(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository)
     if (completed_tasks.items.len > 0) {
         stdout.print("### Completed\n\n", .{}) catch {};
         for (completed_tasks.items) |task| {
-            if (task.after) |after_id| {
-                stdout.print("- [x] {s} (after {s})\n", .{ task.content, after_id }) catch {};
-            } else {
-                stdout.print("- [x] {s}\n", .{ task.content }) catch {};
-            }
+            stdout.print("- [x] {s}\n", .{task.content}) catch {};
         }
         stdout.print("\n", .{}) catch {};
     }
 
-    // Show pending tasks, grouped by ready vs blocked
+    // Show pending tasks
     if (pending_tasks.items.len > 0) {
-        var ready_tasks = std.ArrayList(Task){};
-        var blocked_tasks = std.ArrayList(Task){};
-        defer ready_tasks.deinit(allocator);
-        defer blocked_tasks.deinit(allocator);
-
+        stdout.print("### Pending\n\n", .{}) catch {};
         for (pending_tasks.items) |task| {
-            var is_ready = true;
-
-            // Check if this task is blocked by dependencies
-            if (task.after) |dependency_id| {
-                if (completed_map.get(dependency_id)) |is_dep_completed| {
-                    if (!is_dep_completed) {
-                        is_ready = false;
-                    }
-                } else {
-                    // Dependency doesn't exist - treat as blocked
-                    is_ready = false;
-                }
-            }
-
-            if (is_ready) {
-                ready_tasks.append(allocator, task) catch return Error.AllocationError;
-            } else {
-                blocked_tasks.append(allocator, task) catch return Error.AllocationError;
-            }
+            stdout.print("- [ ] {s}\n", .{task.content}) catch {};
         }
-
-        // Show ready tasks first
-        if (ready_tasks.items.len > 0) {
-            stdout.print("### Ready\n\n", .{}) catch {};
-            for (ready_tasks.items) |task| {
-                stdout.print("- [ ] {s}\n", .{ task.content }) catch {};
-            }
-            stdout.print("\n", .{}) catch {};
-        }
-
-        // Show blocked tasks
-        if (blocked_tasks.items.len > 0) {
-            stdout.print("### Blocked\n\n", .{}) catch {};
-            for (blocked_tasks.items) |task| {
-                if (task.after) |after_id| {
-                    stdout.print("- [ ] {s} (after {s})\n", .{ task.content, after_id }) catch {};
-                } else {
-                    stdout.print("- [ ] {s}\n", .{ task.content }) catch {};
-                }
-            }
-            stdout.print("\n", .{}) catch {};
-        }
+        stdout.print("\n", .{}) catch {};
     }
 }
 
@@ -1139,12 +1006,9 @@ fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
         const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
         defer allocator.free(completed_str);
 
-        const after_str = if (task.after) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
-        defer allocator.free(after_str);
-
         const json_output = try std.fmt.allocPrint(allocator,
-            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s},\"after\":{s}}}",
-            .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
+            .{ task.id, task.content, task.status, task.created, completed_str }
         );
         defer allocator.free(json_output);
 
@@ -1206,16 +1070,6 @@ fn runDelete(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposit
         return Error.TaskNotFound;
     }
 
-    // Check if any other tasks depend on this one
-    for (task_list.tasks.items) |task| {
-        if (task.after) |dependency_id| {
-            if (std.mem.eql(u8, dependency_id, task_id)) {
-                stdout.print("error: task '{s}' cannot be deleted (task '{s}' depends on it)\n", .{ task_id, task.id }) catch {};
-                return Error.InvalidCommand;
-            }
-        }
-    }
-
     // Remove the task
     var removed_task = task_list.tasks.swapRemove(found_index.?);
     removed_task.deinit(allocator);
@@ -1231,332 +1085,6 @@ fn runDelete(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposit
         stdout.print("{{\"deleted\":\"{s}\"}}\n", .{task_id}) catch {};
     } else {
         stdout.print("deleted: {s}\n  {s}\n", .{ task_id, task_content }) catch {};
-    }
-}
-
-fn runRun(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const stderr = std.fs.File.stderr().deprecatedWriter();
-
-    // Parse run command options
-    var runner_type: []const u8 = "claude"; // default to claude
-    var model: ?[]const u8 = null;
-    var custom_runner: ?[]const u8 = null;
-    var once = false;
-    var dry_run = false;
-    var delay: u32 = 2; // default 2 seconds
-    var max_tasks: ?u32 = null;
-
-    var i: usize = 3; // Start after "git tasks run"
-    while (i < args.len) {
-        const arg = std.mem.sliceTo(args[i], 0);
-
-        if (std.mem.eql(u8, arg, "--claude")) {
-            runner_type = "claude";
-        } else if (std.mem.eql(u8, arg, "--opencode")) {
-            runner_type = "opencode";
-        } else if (std.mem.eql(u8, arg, "--runner")) {
-            // Next argument should be the custom runner command
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --runner requires a command\n", .{}) catch {};
-                return Error.InvalidCommand;
-            }
-            custom_runner = std.mem.sliceTo(args[i], 0);
-            runner_type = "custom";
-        } else if (std.mem.eql(u8, arg, "--model")) {
-            // Next argument should be the model name
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --model requires a model name\n", .{}) catch {};
-                return Error.InvalidCommand;
-            }
-            model = std.mem.sliceTo(args[i], 0);
-        } else if (std.mem.eql(u8, arg, "--once")) {
-            once = true;
-        } else if (std.mem.eql(u8, arg, "--dry-run")) {
-            dry_run = true;
-        } else if (std.mem.eql(u8, arg, "--delay")) {
-            // Next argument should be the delay in seconds
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --delay requires a number of seconds\n", .{}) catch {};
-                return Error.InvalidCommand;
-            }
-            const delay_str = std.mem.sliceTo(args[i], 0);
-            delay = std.fmt.parseInt(u32, delay_str, 10) catch {
-                stdout.print("error: invalid delay value '{s}'\n", .{delay_str}) catch {};
-                return Error.InvalidCommand;
-            };
-        } else if (std.mem.eql(u8, arg, "--max-tasks")) {
-            // Next argument should be the maximum number of tasks
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --max-tasks requires a number\n", .{}) catch {};
-                return Error.InvalidCommand;
-            }
-            const max_str = std.mem.sliceTo(args[i], 0);
-            max_tasks = std.fmt.parseInt(u32, max_str, 10) catch {
-                stdout.print("error: invalid max-tasks value '{s}'\n", .{max_str}) catch {};
-                return Error.InvalidCommand;
-            };
-        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            stdout.print(
-                \\usage: git tasks run [options]
-                \\
-                \\Execute RALPH loop to automatically complete tasks.
-                \\
-                \\Options:
-                \\  --claude             Use Claude Code as runner (default)
-                \\  --opencode           Use OpenCode as runner
-                \\  --runner <cmd>       Use custom runner command
-                \\  --model <model>      Model to use (default: claude-sonnet-4-20250514)
-                \\  --once               Run only one task, then exit
-                \\  --dry-run            Show what would run without executing
-                \\  --delay <seconds>    Delay between tasks (default: 2)
-                \\  --max-tasks <n>      Stop after n tasks (safety limit)
-                \\  -h, --help           Show this help message
-                \\
-                \\Examples:
-                \\  git tasks run
-                \\  git tasks run --once
-                \\  git tasks run --model claude-opus-4-20250514
-                \\  git tasks run --opencode --model anthropic/claude-sonnet-4
-                \\  git tasks run --runner "aider --yes"
-                \\  git tasks run --dry-run
-                \\
-            , .{}) catch {};
-            return;
-        } else {
-            stdout.print("error: unknown option '{s}'\n", .{arg}) catch {};
-            return Error.InvalidCommand;
-        }
-        i += 1;
-    }
-
-    // Set default model based on runner type if not specified
-    if (model == null) {
-        model = switch (runner_type[0]) {
-            'c' => if (std.mem.eql(u8, runner_type, "claude")) "claude-sonnet-4-20250514" else null,
-            'o' => "anthropic/claude-sonnet-4",
-            else => null,
-        };
-    }
-
-    var tasks_completed: u32 = 0;
-    var consecutive_failures = std.HashMap([]const u8, u32, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
-    defer consecutive_failures.deinit();
-
-    stdout.print("Starting RALPH loop...\n", .{}) catch {};
-    if (dry_run) {
-        stdout.print("(dry-run mode - no commands will be executed)\n", .{}) catch {};
-    }
-    stdout.print("Runner: {s}", .{runner_type}) catch {};
-    if (model) |m| {
-        stdout.print(" (model: {s})", .{m}) catch {};
-    }
-    stdout.print("\n\n", .{}) catch {};
-
-    while (true) {
-        // Check max_tasks limit
-        if (max_tasks) |max| {
-            if (tasks_completed >= max) {
-                stdout.print("Reached maximum task limit ({})\n", .{max}) catch {};
-                break;
-            }
-        }
-
-        // Get next ready task by directly loading task list
-        var task_list = loadTaskList(repo, allocator) catch |err| {
-            stderr.print("error: failed to load tasks: {}\n", .{err}) catch {};
-            return err;
-        };
-        defer task_list.deinit(allocator);
-
-        // Find ready tasks using same logic as runReady
-        var completed_tasks = std.HashMap([]const u8, bool, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
-        defer completed_tasks.deinit();
-
-        for (task_list.tasks.items) |task| {
-            const is_completed = std.mem.eql(u8, task.status, "completed");
-            completed_tasks.put(task.id, is_completed) catch return Error.AllocationError;
-        }
-
-        var ready_tasks = std.ArrayList(Task){};
-        defer ready_tasks.deinit(allocator);
-
-        for (task_list.tasks.items) |task| {
-            if (std.mem.eql(u8, task.status, "completed")) {
-                continue;
-            }
-
-            var is_ready = true;
-            if (task.after) |dependency_id| {
-                if (completed_tasks.get(dependency_id)) |is_dep_completed| {
-                    if (!is_dep_completed) {
-                        is_ready = false;
-                    }
-                } else {
-                    is_ready = false;
-                }
-            }
-
-            if (is_ready) {
-                // Check if this task has failed too many times
-                const failure_count = consecutive_failures.get(task.id) orelse 0;
-                if (failure_count < 3) {
-                    ready_tasks.append(allocator, task) catch return Error.AllocationError;
-                }
-            }
-        }
-
-        // If no ready tasks, we're done
-        if (ready_tasks.items.len == 0) {
-            stdout.print("No ready tasks remaining. All tasks complete!\n", .{}) catch {};
-            stdout.print("Run: git tasks pr\n", .{}) catch {};
-            break;
-        }
-
-        // Get the first ready task
-        const next_task = ready_tasks.items[0];
-        stdout.print("Starting task: {s}\n", .{next_task.id}) catch {};
-        stdout.print("  {s}\n\n", .{next_task.content}) catch {};
-
-        if (dry_run) {
-            // In dry-run mode, just show what we would do
-            const prompt = try createPrompt(allocator, next_task.id, next_task.content);
-            defer allocator.free(prompt);
-
-            stdout.print("Would execute:\n", .{}) catch {};
-            if (std.mem.eql(u8, runner_type, "claude")) {
-                stdout.print("  claude --print --model {s} \"{s}\"\n", .{ model.?, prompt }) catch {};
-            } else if (std.mem.eql(u8, runner_type, "opencode")) {
-                stdout.print("  opencode run -m {s} \"{s}\"\n", .{ model.?, prompt }) catch {};
-            } else if (custom_runner) |runner| {
-                stdout.print("  {s} \"{s}\"\n", .{ runner, prompt }) catch {};
-            }
-            stdout.print("\n", .{}) catch {};
-        } else {
-            // Execute the task
-            const success = try executeTask(allocator, runner_type, model, custom_runner, next_task.id, next_task.content);
-
-            if (success) {
-                // Reset failure count on success
-                consecutive_failures.put(next_task.id, 0) catch {};
-                tasks_completed += 1;
-                stdout.print("Task completed successfully\n\n", .{}) catch {};
-            } else {
-                // Increment failure count
-                const current_failures = consecutive_failures.get(next_task.id) orelse 0;
-                const new_failures = current_failures + 1;
-                consecutive_failures.put(next_task.id, new_failures) catch {};
-
-                stdout.print("Task failed ({} consecutive failures)\n", .{new_failures}) catch {};
-                if (new_failures >= 3) {
-                    stdout.print("Skipping task after 3 consecutive failures\n", .{}) catch {};
-                }
-                stdout.print("\n", .{}) catch {};
-            }
-        }
-
-        // If --once flag is set, exit after first task
-        if (once) {
-            stdout.print("Exiting after one task (--once flag set)\n", .{}) catch {};
-            break;
-        }
-
-        // Delay between tasks
-        if (!dry_run and delay > 0) {
-            stdout.print("Waiting {} seconds before next task...\n\n", .{delay}) catch {};
-            std.Thread.sleep(delay * std.time.ns_per_s);
-        }
-    }
-
-    stdout.print("RALPH loop completed. {} tasks processed.\n", .{tasks_completed}) catch {};
-}
-
-fn createPrompt(allocator: std.mem.Allocator, task_id: []const u8, task_content: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator,
-        \\You are working on: {s}
-        \\
-        \\Task: {s}
-        \\
-        \\Instructions:
-        \\1. Read AGENTS.md for project context and build instructions
-        \\2. Complete this ONE task only
-        \\3. Verify your work (run tests, check build)
-        \\4. Commit your changes with: git commit -m "<message>" --prompt "{s}"
-        \\5. Mark the task done: ./zig-out/bin/zagi tasks done {s}
-        \\6. If you learn critical operational details, update AGENTS.md
-        \\
-        \\Rules:
-        \\- NEVER git push (only commit)
-        \\- ONLY work on this one task
-        \\- Exit when done so the next task can start
-    , .{ task_id, task_content, task_content, task_id });
-}
-
-fn executeTask(allocator: std.mem.Allocator, runner_type: []const u8, model: ?[]const u8, custom_runner: ?[]const u8, task_id: []const u8, task_content: []const u8) !bool {
-    const stderr = std.fs.File.stderr().deprecatedWriter();
-
-    const prompt = try createPrompt(allocator, task_id, task_content);
-    defer allocator.free(prompt);
-
-    var runner_args = std.array_list.Managed([]const u8).init(allocator);
-    defer runner_args.deinit();
-
-    // Build command based on runner type
-    if (std.mem.eql(u8, runner_type, "claude")) {
-        try runner_args.append("claude");
-        try runner_args.append("--print");
-        if (model) |m| {
-            try runner_args.append("--model");
-            try runner_args.append(m);
-        }
-        try runner_args.append(prompt);
-    } else if (std.mem.eql(u8, runner_type, "opencode")) {
-        try runner_args.append("opencode");
-        try runner_args.append("run");
-        if (model) |m| {
-            try runner_args.append("-m");
-            try runner_args.append(m);
-        }
-        try runner_args.append(prompt);
-    } else if (std.mem.eql(u8, runner_type, "custom")) {
-        if (custom_runner) |runner| {
-            // Split custom runner command by spaces (simple splitting for now)
-            var parts = std.mem.splitScalar(u8, runner, ' ');
-            while (parts.next()) |part| {
-                if (part.len > 0) {
-                    try runner_args.append(part);
-                }
-            }
-            try runner_args.append(prompt);
-        } else {
-            return false;
-        }
-    } else {
-        return false;
-    }
-
-    // Execute the command
-    var child = std.process.Child.init(runner_args.items, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-
-    const term = child.spawnAndWait() catch |err| {
-        stderr.print("Error executing runner: {s}\n", .{@errorName(err)}) catch {};
-        return false;
-    };
-
-    switch (term) {
-        .Exited => |code| {
-            return code == 0;
-        },
-        else => {
-            return false;
-        },
     }
 }
 
