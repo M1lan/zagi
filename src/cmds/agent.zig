@@ -501,9 +501,13 @@ const PendingTasks = struct {
 };
 
 fn getPendingTasks(allocator: std.mem.Allocator) !PendingTasks {
+    // Get absolute path to current executable to avoid relative path issues
+    var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_path = std.fs.selfExePath(&exe_path_buf) catch return error.SpawnFailed;
+
     const result = std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{ "./zig-out/bin/zagi", "tasks", "list", "--json" },
+        .argv = &.{ exe_path, "tasks", "list", "--json" },
     }) catch return error.SpawnFailed;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);

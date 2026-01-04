@@ -18,12 +18,12 @@ Issues encountered while developing zagi agent functionality.
 **Location:** `src/cmds/agent.zig:74-89`
 
 ### 3. Agent run internally uses relative path `./zig-out/bin/zagi`
-**Status:** Open (task-012)
+**Status:** Fixed (task-012)
 **Issue:** `getPendingTasks()` shells out to `./zig-out/bin/zagi tasks list --json` with relative path
 **Impact:** Agent can only run from repo root directory
 **Impact:** Integration tests fail when running from fixture directories
-**Fix needed:** Use absolute path or find binary relative to executable
-**Location:** `src/cmds/agent.zig:476`
+**Fix:** Used `std.fs.selfExePath()` to get absolute path to current executable
+**Location:** `src/cmds/agent.zig:503-506`
 
 ## Memory Management Issues
 
