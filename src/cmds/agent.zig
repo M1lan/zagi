@@ -131,9 +131,14 @@ fn formatExecutorCommand(executor: []const u8, agent_cmd: ?[]const u8) []const u
     return executor;
 }
 
-/// Updates the failure count for a task in the tracking map.
-/// On success (new_count = 0), resets the counter.
-/// On failure (new_count > 0), increments the counter.
+/// Updates the failure count for a task in the consecutive_failures tracking map.
+///
+/// Called after each task execution attempt:
+/// - On success: pass new_count = 0 to reset the counter (task proved it can work)
+/// - On failure: pass the incremented count (previous + 1)
+///
+/// The map uses duplicated keys because task_id strings are freed after each
+/// loop iteration. If the key doesn't exist yet, we allocate a copy.
 fn updateFailureCount(allocator: std.mem.Allocator, map: *std.StringHashMap(u32), task_id: []const u8, new_count: u32) void {
     const gop = map.getOrPut(task_id) catch return;
     if (!gop.found_existing) {
@@ -186,7 +191,22 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
 }
 
-// Planning prompt template - {0} is description, {1} is zagi binary path
+/// Planning prompt template for the `zagi agent plan` subcommand.
+///
+/// This prompt instructs an AI agent to create a detailed implementation plan
+/// by exploring the codebase and breaking down a high-level goal into atomic,
+/// self-contained tasks. The prompt emphasizes:
+///
+/// - **Self-sufficiency**: Each task must be completable without external knowledge
+/// - **Verifiability**: Each task includes acceptance criteria and test instructions
+/// - **Ordering**: Tasks are created in dependency order (foundations first)
+///
+/// Template placeholders:
+/// - {0s}: The user-provided project description/goal
+/// - {1s}: Absolute path to the zagi binary (for task creation commands)
+///
+/// The planning agent uses this prompt in an interactive session where it can
+/// ask clarifying questions before committing to a task breakdown.
 const planning_prompt_template =
     \\You are a planning agent. Your job is to create a detailed implementation plan.
     \\
@@ -319,6 +339,32 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
 }
 
+/// Executes the RALPH (Recursive Agent Loop Pattern for Humans) loop.
+///
+/// The RALPH loop is an autonomous task execution pattern:
+///
+/// ```
+/// ┌─────────────────────────────────────────────────────────┐
+/// │  RALPH Loop Algorithm                                   │
+/// ├─────────────────────────────────────────────────────────┤
+/// │  1. Load pending tasks from git refs                    │
+/// │  2. Find next task with < 3 consecutive failures        │
+/// │  3. If no eligible task found → exit loop               │
+/// │  4. Execute task with configured AI agent               │
+/// │  5. On success: reset failure counter, increment count  │
+/// │     On failure: increment failure counter               │
+/// │  6. If --once flag set → exit loop                      │
+/// │  7. Wait delay seconds, goto step 1                     │
+/// └─────────────────────────────────────────────────────────┘
+/// ```
+///
+/// Key behaviors:
+/// - **Failure tolerance**: Tasks are skipped after 3 consecutive failures
+///   to prevent infinite loops on broken tasks
+/// - **Safety limits**: Optional --max-tasks prevents runaway execution
+/// - **Observability**: All actions logged to agent.log
+/// - **Graceful completion**: Exits when all tasks done or all remaining
+///   tasks have exceeded failure threshold
 fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const stderr = std.fs.File.stderr().deprecatedWriter();
@@ -409,6 +455,21 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     defer if (log_file) |f| f.close();
 
     var tasks_completed: u32 = 0;
+
+    // Consecutive failure tracking map: task_id -> failure_count
+    //
+    // This map tracks how many times each task has failed IN A ROW. The key
+    // insight is "consecutive" - a task that succeeds resets its counter to 0.
+    //
+    // Why track consecutive failures instead of total failures?
+    // - Transient errors (network issues, race conditions) shouldn't permanently
+    //   disqualify a task
+    // - If a task succeeds once, it proves the task CAN work
+    // - 3 consecutive failures strongly suggests the task itself is broken
+    //
+    // Memory management: Keys are duplicated because task IDs come from
+    // getPendingTasks() which frees its memory after each iteration. The
+    // deferred cleanup frees all duplicated keys before map deinit.
     var consecutive_failures = std.StringHashMap(u32).init(allocator);
     defer {
         // Free all the duplicated keys before deiniting the map
