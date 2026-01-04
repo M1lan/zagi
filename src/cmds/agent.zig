@@ -8,8 +8,7 @@ pub const help =
     \\Execute RALPH loop to automatically complete tasks.
     \\
     \\Options:
-    \\  --executor <name>    Executor to use: claudecode, opencode, or custom command
-    \\  --model <model>      Model to use (default depends on executor)
+    \\  --model <model>      Model to use (optional, uses executor default)
     \\  --once               Run only one task, then exit
     \\  --dry-run            Show what would run without executing
     \\  --delay <seconds>    Delay between tasks (default: 2)
@@ -17,13 +16,13 @@ pub const help =
     \\  -h, --help           Show this help message
     \\
     \\Environment:
-    \\  ZAGI_AGENT           Default executor (claudecode, opencode, or command)
+    \\  ZAGI_AGENT           Executor: claude (default) or opencode
+    \\  ZAGI_AGENT_CMD       Custom command override (e.g., "aider --yes")
     \\
     \\Examples:
     \\  zagi agent
-    \\  zagi agent --executor claudecode
-    \\  zagi agent --executor opencode --model anthropic/claude-sonnet-4
-    \\  zagi agent --executor "aider --yes"
+    \\  ZAGI_AGENT=opencode zagi agent
+    \\  ZAGI_AGENT_CMD="aider --yes" zagi agent
     \\  zagi agent --once --dry-run
     \\
 ;
@@ -41,7 +40,6 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     const stderr = std.fs.File.stderr().deprecatedWriter();
 
     // Parse command options
-    var executor: ?[]const u8 = null;
     var model: ?[]const u8 = null;
     var once = false;
     var dry_run = false;
@@ -52,14 +50,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     while (i < args.len) {
         const arg = std.mem.sliceTo(args[i], 0);
 
-        if (std.mem.eql(u8, arg, "--executor")) {
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --executor requires a value\n", .{}) catch {};
-                return Error.InvalidCommand;
-            }
-            executor = std.mem.sliceTo(args[i], 0);
-        } else if (std.mem.eql(u8, arg, "--model")) {
+        if (std.mem.eql(u8, arg, "--model")) {
             i += 1;
             if (i >= args.len) {
                 stdout.print("error: --model requires a model name\n", .{}) catch {};
@@ -102,24 +93,14 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         i += 1;
     }
 
-    // Check ZAGI_AGENT env var if no executor specified
-    if (executor == null) {
-        executor = std.posix.getenv("ZAGI_AGENT");
-    }
+    // Check ZAGI_AGENT_CMD for custom command override
+    const agent_cmd = std.posix.getenv("ZAGI_AGENT_CMD");
 
-    // Default to claudecode if nothing specified
-    if (executor == null) {
-        executor = "claudecode";
-    }
+    // Get executor from ZAGI_AGENT env var, default to "claude"
+    const executor = std.posix.getenv("ZAGI_AGENT") orelse "claude";
 
-    // Set default model based on executor if not specified
-    if (model == null) {
-        if (std.mem.eql(u8, executor.?, "claudecode")) {
-            model = "claude-sonnet-4-20250514";
-        } else if (std.mem.eql(u8, executor.?, "opencode")) {
-            model = "anthropic/claude-sonnet-4";
-        }
-    }
+    // Note: model is only used if explicitly set via --model flag
+    // Executors use their own defaults when model is null
 
     // Initialize libgit2
     if (c.git_libgit2_init() < 0) {
@@ -163,7 +144,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     if (dry_run) {
         stdout.print("(dry-run mode - no commands will be executed)\n", .{}) catch {};
     }
-    stdout.print("Executor: {s}", .{executor.?}) catch {};
+    stdout.print("Executor: {s}", .{executor}) catch {};
     if (model) |m| {
         stdout.print(" (model: {s})", .{m}) catch {};
     }
@@ -217,30 +198,34 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 
         if (dry_run) {
             stdout.print("Would execute:\n", .{}) catch {};
-            if (std.mem.eql(u8, executor.?, "claudecode")) {
-                stdout.print("  claude --print --model {s} \"<prompt>\"\n", .{model.?}) catch {};
-            } else if (std.mem.eql(u8, executor.?, "opencode")) {
-                stdout.print("  opencode run -m {s} \"<prompt>\"\n", .{model.?}) catch {};
+            if (agent_cmd) |cmd| {
+                stdout.print("  {s} \"<prompt>\"\n", .{cmd}) catch {};
+            } else if (std.mem.eql(u8, executor, "claude")) {
+                stdout.print("  claude -p \"<prompt>\"\n", .{}) catch {};
+            } else if (std.mem.eql(u8, executor, "opencode")) {
+                stdout.print("  opencode run \"<prompt>\"\n", .{}) catch {};
             } else {
-                stdout.print("  {s} \"<prompt>\"\n", .{executor.?}) catch {};
+                stdout.print("  {s} \"<prompt>\"\n", .{executor}) catch {};
             }
             stdout.print("\n", .{}) catch {};
             tasks_completed += 1;
         } else {
             // Execute the task
-            const success = executeTask(allocator, executor.?, model, task.id, task.content) catch false;
+            const success = executeTask(allocator, executor, model, agent_cmd, task.id, task.content) catch false;
 
             if (success) {
-                // Reset failure count on success
-                consecutive_failures.put(task.id, 0) catch {};
+                // Reset failure count on success - need to dupe key since task.id will be freed
+                const key = allocator.dupe(u8, task.id) catch task.id;
+                consecutive_failures.put(key, 0) catch {};
                 tasks_completed += 1;
                 stdout.print("Task completed successfully\n\n", .{}) catch {};
                 logToFile(allocator, log_file, "Task {s} completed successfully\n", .{task.id});
             } else {
-                // Increment failure count
+                // Increment failure count - need to dupe key since task.id will be freed
                 const current_failures = consecutive_failures.get(task.id) orelse 0;
                 const new_failures = current_failures + 1;
-                consecutive_failures.put(task.id, new_failures) catch {};
+                const key = allocator.dupe(u8, task.id) catch task.id;
+                consecutive_failures.put(key, new_failures) catch {};
 
                 stdout.print("Task failed ({} consecutive failures)\n", .{new_failures}) catch {};
                 logToFile(allocator, log_file, "Task {s} failed ({} consecutive failures)\n", .{ task.id, new_failures });
@@ -335,7 +320,7 @@ fn createPrompt(allocator: std.mem.Allocator, task_id: []const u8, task_content:
     , .{ task_id, task_content, task_id });
 }
 
-fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]const u8, task_id: []const u8, task_content: []const u8) !bool {
+fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]const u8, agent_cmd: ?[]const u8, task_id: []const u8, task_content: []const u8) !bool {
     const stderr = std.fs.File.stderr().deprecatedWriter();
 
     const prompt = try createPrompt(allocator, task_id, task_content);
@@ -344,10 +329,19 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]con
     var runner_args = std.ArrayList([]const u8){};
     defer runner_args.deinit(allocator);
 
-    // Build command based on executor
-    if (std.mem.eql(u8, executor, "claudecode")) {
+    // Build command based on agent_cmd override or executor
+    if (agent_cmd) |cmd| {
+        // Custom command from ZAGI_AGENT_CMD - split by spaces
+        var parts = std.mem.splitScalar(u8, cmd, ' ');
+        while (parts.next()) |part| {
+            if (part.len > 0) {
+                try runner_args.append(allocator, part);
+            }
+        }
+        try runner_args.append(allocator, prompt);
+    } else if (std.mem.eql(u8, executor, "claude")) {
         try runner_args.append(allocator, "claude");
-        try runner_args.append(allocator, "--print");
+        try runner_args.append(allocator, "-p");
         if (model) |m| {
             try runner_args.append(allocator, "--model");
             try runner_args.append(allocator, m);
@@ -362,7 +356,7 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]con
         }
         try runner_args.append(allocator, prompt);
     } else {
-        // Custom executor - split by spaces
+        // Custom executor from ZAGI_AGENT - split by spaces
         var parts = std.mem.splitScalar(u8, executor, ' ');
         while (parts.next()) |part| {
             if (part.len > 0) {
