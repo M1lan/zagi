@@ -3,6 +3,34 @@ const git = @import("git.zig");
 const c = git.c;
 const json = std.json;
 
+/// Escape a string for JSON output (escapes quotes, backslashes, newlines, etc.)
+fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var result = std.ArrayList(u8){};
+    errdefer result.deinit(allocator);
+
+    for (input) |char| {
+        switch (char) {
+            '"' => try result.appendSlice(allocator, "\\\""),
+            '\\' => try result.appendSlice(allocator, "\\\\"),
+            '\n' => try result.appendSlice(allocator, "\\n"),
+            '\r' => try result.appendSlice(allocator, "\\r"),
+            '\t' => try result.appendSlice(allocator, "\\t"),
+            else => {
+                if (char < 0x20) {
+                    // Control characters - output as \u00XX
+                    var buf: [6]u8 = undefined;
+                    const len = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{char}) catch unreachable;
+                    try result.appendSlice(allocator, len);
+                } else {
+                    try result.append(allocator, char);
+                }
+            },
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
+}
+
 pub const help =
     \\usage: git tasks <command> [options]
     \\
@@ -574,9 +602,13 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
             const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
             defer allocator.free(completed_str);
 
+            // Escape content for JSON (handles quotes, newlines, etc.)
+            const escaped_content = escapeJsonString(allocator, task.content) catch return Error.AllocationError;
+            defer allocator.free(escaped_content);
+
             const task_json = try std.fmt.allocPrint(allocator,
                 "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
-                .{ task.id, task.content, task.status, task.created, completed_str }
+                .{ task.id, escaped_content, task.status, task.created, completed_str }
             );
             defer allocator.free(task_json);
 

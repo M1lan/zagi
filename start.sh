@@ -1,50 +1,31 @@
 #!/bin/bash
-# Generic RALPH loop - run Claude Code over tasks from plan.md
+# RALPH loop - run Claude over zagi tasks
 #
 # Usage: ./start.sh [options]
 #   Options:
-#     --plan <file>     Plan file to use (default: plan.md)
-#     --model <model>   Model to use (default: claude-sonnet-4-20250514)
 #     --delay <secs>    Delay between tasks (default: 2)
 #     --once            Run only one task then exit
 #     --dry-run         Show what would run without executing
-#     --import          Import tasks from plan.md into git tasks
 #     --help            Show this help
 
 set -e
 
 # Defaults
-PLAN_FILE="${PLAN_FILE:-plan.md}"
-MODEL="${MODEL:-claude-sonnet-4-20250514}"
 DELAY="${DELAY:-2}"
 ONCE=false
 DRY_RUN=false
-IMPORT=false
 
 # Auto-detect git tasks command
-# Use local build if available, otherwise try git tasks
 if [ -x "./zig-out/bin/zagi" ]; then
-  GIT_TASKS="./zig-out/bin/zagi tasks"
-elif command -v zagi &> /dev/null; then
-  GIT_TASKS="zagi tasks"
-elif git tasks --help &> /dev/null 2>&1; then
-  GIT_TASKS="git tasks"
+  ZAGI="./zig-out/bin/zagi"
 else
-  echo "error: zagi not found. Build with 'zig build' or install zagi."
+  echo "error: ./zig-out/bin/zagi not found. Build with 'zig build' first."
   exit 1
 fi
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --plan)
-      PLAN_FILE="$2"
-      shift 2
-      ;;
-    --model)
-      MODEL="$2"
-      shift 2
-      ;;
     --delay)
       DELAY="$2"
       shift 2
@@ -57,12 +38,8 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=true
       shift
       ;;
-    --import)
-      IMPORT=true
-      shift
-      ;;
     --help|-h)
-      sed -n '2,12p' "$0" | sed 's/^# //' | sed 's/^#//'
+      sed -n '2,10p' "$0" | sed 's/^# //' | sed 's/^#//'
       exit 0
       ;;
     *)
@@ -78,52 +55,52 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
   exit 1
 fi
 
-# Import tasks from plan.md if requested
-if [ "$IMPORT" = true ]; then
-  if [ ! -f "$PLAN_FILE" ]; then
-    echo "error: plan file not found: $PLAN_FILE"
-    exit 1
-  fi
-
-  echo "Importing tasks from $PLAN_FILE..."
-
-  # Parse markdown checkboxes: - [ ] task content
-  grep -E '^\s*- \[ \]' "$PLAN_FILE" | sed 's/^\s*- \[ \] //' | while read -r task; do
-    if [ -n "$task" ]; then
-      echo "  Adding: $task"
-      $GIT_TASKS add "$task" 2>/dev/null || echo "    (skipped - may already exist)"
-    fi
-  done
-
-  echo ""
-  echo "Import complete. Run without --import to start the loop."
-  exit 0
-fi
-
 echo "RALPH loop starting..."
-echo "Model: $MODEL"
 if [ "$DRY_RUN" = true ]; then
   echo "(dry-run mode)"
 fi
 echo ""
 
 # Show current tasks
-$GIT_TASKS list 2>/dev/null || echo "No tasks found. Use --import to import from $PLAN_FILE"
+$ZAGI tasks list 2>/dev/null || echo "No tasks found."
 echo ""
 
 while true; do
-  # Get first ready task as JSON for reliable parsing
-  READY_JSON=$($GIT_TASKS ready --json 2>/dev/null || echo "[]")
+  # Get all tasks as JSON and find first pending
+  TASKS_JSON=$($ZAGI tasks list --json 2>/dev/null || echo '{"tasks":[]}')
 
-  # Parse first task from JSON array
-  TASK_ID=$(echo "$READY_JSON" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
-  TASK_CONTENT=$(echo "$READY_JSON" | grep -o '"content":"[^"]*"' | head -1 | sed 's/"content":"//;s/"//')
+  # Extract first pending task using basic parsing
+  # Look for pending tasks in the JSON
+  TASK_LINE=$(echo "$TASKS_JSON" | tr ',' '\n' | grep -A5 '"status":"pending"' | head -6)
+
+  if [ -z "$TASK_LINE" ]; then
+    echo ""
+    echo "=== All tasks complete! ==="
+    exit 0
+  fi
+
+  # Extract task ID and content
+  TASK_ID=$(echo "$TASKS_JSON" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for t in data.get('tasks', []):
+    if t.get('status') == 'pending':
+        print(t['id'])
+        break
+" 2>/dev/null || echo "")
+
+  TASK_CONTENT=$(echo "$TASKS_JSON" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for t in data.get('tasks', []):
+    if t.get('status') == 'pending':
+        print(t['content'])
+        break
+" 2>/dev/null || echo "")
 
   if [ -z "$TASK_ID" ]; then
     echo ""
     echo "=== All tasks complete! ==="
-    echo ""
-    $GIT_TASKS pr 2>/dev/null || echo "No tasks to export."
     exit 0
   fi
 
@@ -140,8 +117,8 @@ Instructions:
 1. Read AGENTS.md for project context and build instructions
 2. Complete this ONE task only
 3. Verify your work (run tests, check build)
-4. Commit your changes with: git commit -m \"<message>\" --prompt \"$TASK_CONTENT\"
-5. Mark the task done: git tasks done $TASK_ID
+4. Commit your changes with: git commit -m \"<message>\"
+5. Mark the task done: $ZAGI tasks done $TASK_ID
 6. If you learn critical operational details, update AGENTS.md
 
 Rules:
@@ -151,15 +128,16 @@ Rules:
 
   if [ "$DRY_RUN" = true ]; then
     echo "Would execute:"
-    echo "  claude --print --model $MODEL \"<prompt>\""
+    echo "  claude -p \"<prompt>\""
     echo ""
-    echo "Prompt:"
-    echo "$PROMPT" | sed 's/^/  /'
+    echo "Prompt preview:"
+    echo "$PROMPT" | head -10
+    echo "..."
     echo ""
   else
-    # Run Claude Code in headless mode
-    export ZAGI_AGENT=claude-code
-    claude --print --dangerously-skip-permissions --model "$MODEL" "$PROMPT"
+    # Run Claude in headless mode
+    export ZAGI_AGENT=claude
+    claude -p "$PROMPT"
   fi
 
   echo ""
