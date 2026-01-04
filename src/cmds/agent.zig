@@ -112,11 +112,11 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
 }
 
-// Planning prompt - guides agent to create detailed, engineer-ready plans
-const planning_prompt =
+// Planning prompt template - {0} is description, {1} is zagi binary path
+const planning_prompt_template =
     \\You are a planning agent. Your job is to create a detailed implementation plan.
     \\
-    \\PROJECT GOAL: {s}
+    \\PROJECT GOAL: {0s}
     \\
     \\INSTRUCTIONS:
     \\1. Read AGENTS.md to understand the project context, conventions, and build commands
@@ -129,7 +129,7 @@ const planning_prompt =
     \\
     \\CREATING TASKS:
     \\Once your plan is ready, create tasks using:
-    \\  ./zig-out/bin/zagi tasks add "<task description with acceptance criteria>"
+    \\  {1s} tasks add "<task description with acceptance criteria>"
     \\
     \\Example task format:
     \\  "Implement login API endpoint - add POST /api/login that validates credentials and returns JWT. Test: curl -X POST with valid/invalid creds"
@@ -139,7 +139,7 @@ const planning_prompt =
     \\- Each task should include how to verify it works
     \\- Include test requirements in task descriptions
     \\- NEVER git push (only commit)
-    \\- After creating all tasks, run: ./zig-out/bin/zagi tasks list
+    \\- After creating all tasks, run: {1s} tasks list
     \\
 ;
 
@@ -188,8 +188,15 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     else
         try getValidatedExecutor(stdout);
 
-    // Create the planning prompt
-    const prompt = std.fmt.allocPrint(allocator, planning_prompt, .{description.?}) catch return Error.OutOfMemory;
+    // Get absolute path to current executable
+    var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_path = std.fs.selfExePath(&exe_path_buf) catch {
+        stderr.print("error: failed to resolve executable path\n", .{}) catch {};
+        return Error.SpawnFailed;
+    };
+
+    // Create the planning prompt with dynamic path
+    const prompt = std.fmt.allocPrint(allocator, planning_prompt_template, .{ description.?, exe_path }) catch return Error.OutOfMemory;
     defer allocator.free(prompt);
 
     if (dry_run) {
@@ -353,6 +360,13 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     else
         try getValidatedExecutor(stdout);
 
+    // Get absolute path to current executable
+    var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_path = std.fs.selfExePath(&exe_path_buf) catch {
+        stderr.print("error: failed to resolve executable path\n", .{}) catch {};
+        return Error.SpawnFailed;
+    };
+
     // Initialize libgit2
     if (c.git_libgit2_init() < 0) {
         return git.Error.InitFailed;
@@ -453,7 +467,7 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             stdout.print("\n", .{}) catch {};
             tasks_completed += 1;
         } else {
-            const success = executeTask(allocator, executor, model, agent_cmd, task.id, task.content) catch false;
+            const success = executeTask(allocator, executor, model, agent_cmd, exe_path, task.id, task.content) catch false;
 
             if (success) {
                 const key = allocator.dupe(u8, task.id) catch task.id;
@@ -538,31 +552,31 @@ fn getPendingTasks(allocator: std.mem.Allocator) !PendingTasks {
     return PendingTasks{ .tasks = pending.toOwnedSlice(allocator) catch &.{} };
 }
 
-fn createPrompt(allocator: std.mem.Allocator, task_id: []const u8, task_content: []const u8) ![]u8 {
+fn createPrompt(allocator: std.mem.Allocator, exe_path: []const u8, task_id: []const u8, task_content: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator,
-        \\You are working on: {s}
+        \\You are working on: {0s}
         \\
-        \\Task: {s}
+        \\Task: {1s}
         \\
         \\Instructions:
         \\1. Read AGENTS.md for project context and build instructions
         \\2. Complete this ONE task only
         \\3. Verify your work (run tests, check build)
         \\4. Commit your changes with: git commit -m "<message>"
-        \\5. Mark the task done: ./zig-out/bin/zagi tasks done {s}
+        \\5. Mark the task done: {2s} tasks done {0s}
         \\6. If you learn critical operational details, update AGENTS.md
         \\
         \\Rules:
         \\- NEVER git push (only commit)
         \\- ONLY work on this one task
         \\- Exit when done so the next task can start
-    , .{ task_id, task_content, task_id });
+    , .{ task_id, task_content, exe_path });
 }
 
-fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]const u8, agent_cmd: ?[]const u8, task_id: []const u8, task_content: []const u8) !bool {
+fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]const u8, agent_cmd: ?[]const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8) !bool {
     const stderr = std.fs.File.stderr().deprecatedWriter();
 
-    const prompt = try createPrompt(allocator, task_id, task_content);
+    const prompt = try createPrompt(allocator, exe_path, task_id, task_content);
     defer allocator.free(prompt);
 
     var runner_args = std.ArrayList([]const u8){};
