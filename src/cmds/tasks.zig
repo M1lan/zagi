@@ -1072,20 +1072,22 @@ fn runDelete(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposit
 
     // Remove the task
     var removed_task = task_list.tasks.swapRemove(found_index.?);
-    removed_task.deinit(allocator);
 
     // Save updated task list
     saveTaskList(repo, task_list, allocator) catch |err| {
         stdout.print("error: failed to save tasks: {}\n", .{err}) catch {};
+        removed_task.deinit(allocator);
         return err;
     };
 
-    // Output confirmation
+    // Output confirmation (must happen before deinit frees task_content)
     if (use_json) {
         stdout.print("{{\"deleted\":\"{s}\"}}\n", .{task_id}) catch {};
     } else {
         stdout.print("deleted: {s}\n  {s}\n", .{ task_id, task_content }) catch {};
     }
+
+    removed_task.deinit(allocator);
 }
 
 // Tests

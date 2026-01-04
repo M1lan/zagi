@@ -333,7 +333,8 @@ describe("error handling", () => {
   test("works in non-git directory", () => {
     const result = zagi(["tasks", "add", "Test task"], { cwd: "/tmp" });
 
-    expect(result).toContain("error");
+    // Should show error - either "error" or "fatal" depending on git behavior
+    expect(result.toLowerCase()).toMatch(/error|fatal/);
   });
 });
 
