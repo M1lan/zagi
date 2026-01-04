@@ -3,7 +3,7 @@ const git = @import("git.zig");
 const c = git.c;
 
 pub const help =
-    \\usage: zagi agent <command> [options]
+    \\usage: git agent <command> [options]
     \\
     \\AI agent for automated task execution.
     \\
@@ -11,7 +11,7 @@ pub const help =
     \\  run      Execute RALPH loop to complete tasks
     \\  plan     Start planning session to create tasks
     \\
-    \\Run 'zagi agent <command> --help' for command-specific options.
+    \\Run 'git agent <command> --help' for command-specific options.
     \\
     \\Environment:
     \\  ZAGI_AGENT           Executor: claude (default) or opencode
@@ -20,7 +20,7 @@ pub const help =
 ;
 
 const run_help =
-    \\usage: zagi agent run [options]
+    \\usage: git agent run [options]
     \\
     \\Execute RALPH loop to automatically complete tasks.
     \\
@@ -33,15 +33,15 @@ const run_help =
     \\  -h, --help           Show this help message
     \\
     \\Examples:
-    \\  zagi agent run
-    \\  zagi agent run --once
-    \\  zagi agent run --dry-run
-    \\  ZAGI_AGENT=opencode zagi agent run
+    \\  git agent run
+    \\  git agent run --once
+    \\  git agent run --dry-run
+    \\  ZAGI_AGENT=opencode git agent run
     \\
 ;
 
 const plan_help =
-    \\usage: zagi agent plan [options] <description>
+    \\usage: git agent plan [options] <description>
     \\
     \\Start a planning session to create detailed tasks.
     \\
@@ -51,8 +51,8 @@ const plan_help =
     \\  -h, --help           Show this help message
     \\
     \\Examples:
-    \\  zagi agent plan "Add user authentication"
-    \\  zagi agent plan --dry-run "Refactor database layer"
+    \\  git agent plan "Add user authentication"
+    \\  git agent plan --dry-run "Refactor database layer"
     \\
 ;
 
@@ -186,7 +186,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         stdout.print("{s}", .{help}) catch {};
         return;
     } else {
-        stdout.print("error: unknown subcommand '{s}'\n\n{s}", .{ subcommand, help }) catch {};
+        stdout.print("error: unknown command '{s}'\n\n{s}", .{ subcommand, help }) catch {};
         return Error.InvalidCommand;
     }
 }
