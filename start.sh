@@ -135,9 +135,15 @@ Rules:
     echo "..."
     echo ""
   else
-    # Run Claude in headless mode
+    # Run Claude in headless mode with streaming JSON output
     export ZAGI_AGENT=claude
-    claude -p "$PROMPT"
+    TASK_LOG="logs/${TASK_ID}.json"
+    mkdir -p logs
+    echo "Streaming to: $TASK_LOG"
+
+    # Use CC_CMD if set, otherwise default to claude
+    CC="${CC_CMD:-claude --dangerously-skip-permissions}"
+    $CC -p --verbose --output-format stream-json "$PROMPT" 2>&1 | tee "$TASK_LOG"
   fi
 
   echo ""
