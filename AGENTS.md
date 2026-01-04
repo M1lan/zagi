@@ -45,6 +45,88 @@ When this is set:
 1. `git commit` will fail without `--prompt`, ensuring all AI-generated commits have their prompts recorded
 2. Destructive commands are blocked to prevent data loss
 
+## Agent Subcommands
+
+zagi provides two agent subcommands for autonomous task execution using the RALPH pattern (Recursive Agent Loop Pattern for Humans).
+
+### zagi agent plan
+
+Starts an interactive planning session where an AI agent explores the codebase, asks questions, and creates tasks.
+
+```bash
+# Basic usage - provide a description of what you want to build
+zagi agent plan "Add user authentication with JWT"
+
+# Preview the prompt without executing
+zagi agent plan --dry-run "Refactor database layer"
+
+# Specify a model (passed to the executor)
+zagi agent plan --model claude-sonnet-4-20250514 "Add caching layer"
+```
+
+The planning agent will:
+1. Read AGENTS.md to understand project conventions
+2. Explore the codebase to understand architecture
+3. Create detailed, self-contained tasks using `zagi tasks add`
+4. Each task includes acceptance criteria and verification steps
+
+### zagi agent run
+
+Executes the RALPH loop to automatically complete pending tasks.
+
+```bash
+# Run until all tasks complete (or fail 3x)
+zagi agent run
+
+# Run only one task then exit
+zagi agent run --once
+
+# Preview what would run without executing
+zagi agent run --dry-run
+
+# Set delay between tasks (default: 2 seconds)
+zagi agent run --delay 5
+
+# Safety limit - stop after N tasks
+zagi agent run --max-tasks 10
+
+# Specify a model
+zagi agent run --model claude-sonnet-4-20250514
+```
+
+The run loop will:
+1. Pick the next pending task
+2. Execute it with the configured agent
+3. Mark it done on success (agent calls `zagi tasks done <task-id>`)
+4. Skip tasks that fail 3 consecutive times
+5. Continue until all tasks complete
+
+### Executor Configuration
+
+Control which AI agent executes tasks using environment variables:
+
+**ZAGI_AGENT** - Select a built-in executor:
+```bash
+# Use Claude Code (default)
+ZAGI_AGENT=claude zagi agent run
+
+# Use opencode
+ZAGI_AGENT=opencode zagi agent run
+```
+
+Valid values: `claude`, `opencode`
+
+**ZAGI_AGENT_CMD** - Use a custom command:
+```bash
+# Use aider
+ZAGI_AGENT_CMD="aider --yes" zagi agent run
+
+# Use any CLI tool that accepts a prompt as the last argument
+ZAGI_AGENT_CMD="my-custom-agent" zagi agent plan "Build feature X"
+```
+
+When `ZAGI_AGENT_CMD` is set, it overrides the executor selection. The prompt is appended as the final argument to your command.
+
 ### Blocked Commands (in agent mode)
 
 These commands cause unrecoverable data loss and are blocked when `ZAGI_AGENT` is set:
