@@ -114,12 +114,12 @@ for t in data.get('tasks', []):
 Task: $TASK_CONTENT
 
 Instructions:
-1. Read AGENTS.md for project context and build instructions
-2. Complete this ONE task only
-3. Verify your work (run tests, check build)
-4. Commit your changes with: git commit -m \"<message>\"
-5. Mark the task done: $ZAGI tasks done $TASK_ID
-6. If you learn critical operational details, update AGENTS.md
+1. Read CONTEXT.md for mission context and current focus
+2. Read AGENTS.md for build instructions and conventions
+3. Complete this ONE task only
+4. Verify your work (run tests, check build)
+5. Commit your changes with: git commit -m \"<message>\"
+6. Mark the task done: $ZAGI tasks done $TASK_ID
 
 Rules:
 - NEVER git push (only commit)

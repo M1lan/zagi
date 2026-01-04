@@ -457,6 +457,7 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
 
     // Parse arguments for content and --json flag
     var content: ?[]const u8 = null;
+    var content_allocated = false; // Track if content was allocated by us
     var use_json = false;
     var i: usize = 3; // Start after "git tasks add"
 
@@ -472,11 +473,19 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
             // Multiple content arguments - concatenate with spaces
             const existing = content.?;
             const combined = std.fmt.allocPrint(allocator, "{s} {s}", .{ existing, arg }) catch return Error.AllocationError;
-            // Note: we're not tracking these allocations, but they're short-lived
+            // Free previous allocation if we made one
+            if (content_allocated) {
+                allocator.free(@constCast(existing));
+            }
             content = combined;
+            content_allocated = true;
         }
         i += 1;
     }
+    // Clean up content allocation on early returns or at end of function
+    defer if (content_allocated) {
+        if (content) |content_ptr| allocator.free(@constCast(content_ptr));
+    };
 
     if (content == null or content.?.len == 0) {
         stdout.print("error: task content cannot be empty\n", .{}) catch {};
