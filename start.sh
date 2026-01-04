@@ -141,7 +141,8 @@ Rules:
     mkdir -p logs
     echo "Streaming to: $TASK_LOG"
 
-    # Use CC_CMD if set, otherwise default to claude
+    # Use CC_CMD if set, otherwise default to claude with skip-permissions
+    # Note: can't use 'cc' alias since shell aliases don't work in scripts
     CC="${CC_CMD:-claude --dangerously-skip-permissions}"
     $CC -p --verbose --output-format stream-json "$PROMPT" 2>&1 | tee "$TASK_LOG"
   fi
