@@ -12,11 +12,10 @@ Issues encountered while developing zagi agent functionality.
 **Location:** `src/cmds/agent.zig:429-438`
 
 ### 2. ZAGI_AGENT=1 treated as executor name
-**Status:** Open (task-011)
+**Status:** Fixed
 **Issue:** When ZAGI_AGENT is set to "1" (boolean-style), it's used literally as executor name
-**Expected:** Should error or default to "claude"
-**Workaround:** Set `ZAGI_AGENT=claude` explicitly
-**Location:** `src/cmds/agent.zig:162,324` - no validation of executor value
+**Fix:** Added `getValidatedExecutor()` that validates against known values ("claude", "opencode")
+**Location:** `src/cmds/agent.zig:74-89`
 
 ### 3. Agent run internally uses relative path `./zig-out/bin/zagi`
 **Status:** Open (task-012)
@@ -42,10 +41,9 @@ Issues encountered while developing zagi agent functionality.
 ## API Design Issues
 
 ### 6. No validation of ZAGI_AGENT values
-**Status:** Open (task-011)
+**Status:** Fixed (see #2)
 **Issue:** Invalid executor values like "1" silently used as custom command
-**Expected:** Validate against known executors ("claude", "opencode") or error clearly
-**Location:** `src/cmds/agent.zig:162,324`
+**Fix:** `getValidatedExecutor()` validates and returns clear error for invalid values
 
 ### 7. Agent prompt path hardcoded
 **Status:** Open (task-014)

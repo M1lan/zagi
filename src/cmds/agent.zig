@@ -62,7 +62,31 @@ pub const Error = git.Error || error{
     OutOfMemory,
     SpawnFailed,
     TaskLoadFailed,
+    InvalidExecutor,
 };
+
+/// Valid executor values for ZAGI_AGENT
+const valid_executors = [_][]const u8{ "claude", "opencode" };
+
+/// Validates ZAGI_AGENT env var. Returns validated executor or error.
+/// If not set, returns "claude" as default.
+/// If set to invalid value (like "1"), returns error.
+fn getValidatedExecutor(stdout: anytype) Error![]const u8 {
+    const env_value = std.posix.getenv("ZAGI_AGENT") orelse return "claude";
+
+    // Check if it's a valid executor
+    for (valid_executors) |valid| {
+        if (std.mem.eql(u8, env_value, valid)) {
+            return env_value;
+        }
+    }
+
+    // Invalid value - show error with valid options
+    stdout.print("error: invalid ZAGI_AGENT value '{s}'\n", .{env_value}) catch {};
+    stdout.print("  valid values: claude, opencode (or unset for default)\n", .{}) catch {};
+    stdout.print("  note: use ZAGI_AGENT_CMD for custom executors\n", .{}) catch {};
+    return Error.InvalidExecutor;
+}
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -159,7 +183,10 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 
     // Check ZAGI_AGENT_CMD for custom command override
     const agent_cmd = std.posix.getenv("ZAGI_AGENT_CMD");
-    const executor = std.posix.getenv("ZAGI_AGENT") orelse "claude";
+    const executor = if (agent_cmd != null)
+        std.posix.getenv("ZAGI_AGENT") orelse "claude" // Custom cmd bypasses validation
+    else
+        try getValidatedExecutor(stdout);
 
     // Create the planning prompt
     const prompt = std.fmt.allocPrint(allocator, planning_prompt, .{description.?}) catch return Error.OutOfMemory;
@@ -321,7 +348,10 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
 
     const agent_cmd = std.posix.getenv("ZAGI_AGENT_CMD");
-    const executor = std.posix.getenv("ZAGI_AGENT") orelse "claude";
+    const executor = if (agent_cmd != null)
+        std.posix.getenv("ZAGI_AGENT") orelse "claude" // Custom cmd bypasses validation
+    else
+        try getValidatedExecutor(stdout);
 
     // Initialize libgit2
     if (c.git_libgit2_init() < 0) {
