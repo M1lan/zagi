@@ -68,6 +68,80 @@ pub const Error = git.Error || error{
 /// Valid executor values for ZAGI_AGENT
 const valid_executors = [_][]const u8{ "claude", "opencode" };
 
+/// Logs a formatted message to a file (if available).
+fn logToFile(allocator: std.mem.Allocator, file: ?std.fs.File, comptime fmt: []const u8, log_args: anytype) void {
+    if (file) |f| {
+        const msg = std.fmt.allocPrint(allocator, fmt, log_args) catch return;
+        defer allocator.free(msg);
+        f.writeAll(msg) catch {};
+    }
+}
+
+/// Builds command arguments for the specified executor.
+/// Returns an ArrayList that the caller must deinit.
+fn buildExecutorArgs(
+    allocator: std.mem.Allocator,
+    executor: []const u8,
+    model: ?[]const u8,
+    agent_cmd: ?[]const u8,
+    prompt: []const u8,
+) !std.ArrayList([]const u8) {
+    var args = std.ArrayList([]const u8){};
+    errdefer args.deinit(allocator);
+
+    if (agent_cmd) |cmd| {
+        var parts = std.mem.splitScalar(u8, cmd, ' ');
+        while (parts.next()) |part| {
+            if (part.len > 0) try args.append(allocator, part);
+        }
+        try args.append(allocator, prompt);
+    } else if (std.mem.eql(u8, executor, "claude")) {
+        try args.append(allocator, "claude");
+        try args.append(allocator, "-p");
+        if (model) |m| {
+            try args.append(allocator, "--model");
+            try args.append(allocator, m);
+        }
+        try args.append(allocator, prompt);
+    } else if (std.mem.eql(u8, executor, "opencode")) {
+        try args.append(allocator, "opencode");
+        try args.append(allocator, "run");
+        if (model) |m| {
+            try args.append(allocator, "-m");
+            try args.append(allocator, m);
+        }
+        try args.append(allocator, prompt);
+    } else {
+        // Fallback: split executor as command
+        var parts = std.mem.splitScalar(u8, executor, ' ');
+        while (parts.next()) |part| {
+            if (part.len > 0) try args.append(allocator, part);
+        }
+        try args.append(allocator, prompt);
+    }
+
+    return args;
+}
+
+/// Formats the executor command for dry-run display.
+fn formatExecutorCommand(executor: []const u8, agent_cmd: ?[]const u8) []const u8 {
+    if (agent_cmd) |cmd| return cmd;
+    if (std.mem.eql(u8, executor, "claude")) return "claude -p";
+    if (std.mem.eql(u8, executor, "opencode")) return "opencode run";
+    return executor;
+}
+
+/// Updates the failure count for a task in the tracking map.
+/// On success (new_count = 0), resets the counter.
+/// On failure (new_count > 0), increments the counter.
+fn updateFailureCount(allocator: std.mem.Allocator, map: *std.StringHashMap(u32), task_id: []const u8, new_count: u32) void {
+    const gop = map.getOrPut(task_id) catch return;
+    if (!gop.found_existing) {
+        gop.key_ptr.* = allocator.dupe(u8, task_id) catch task_id;
+    }
+    gop.value_ptr.* = new_count;
+}
+
 /// Validates ZAGI_AGENT env var. Returns validated executor or error.
 /// If not set, returns "claude" as default.
 /// If set to invalid value (like "1"), returns error.
@@ -203,15 +277,7 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         stdout.print("=== Planning Session (dry-run) ===\n\n", .{}) catch {};
         stdout.print("Goal: {s}\n\n", .{description.?}) catch {};
         stdout.print("Would execute:\n", .{}) catch {};
-        if (agent_cmd) |cmd| {
-            stdout.print("  {s} \"<planning prompt>\"\n", .{cmd}) catch {};
-        } else if (std.mem.eql(u8, executor, "claude")) {
-            stdout.print("  claude -p \"<planning prompt>\"\n", .{}) catch {};
-        } else if (std.mem.eql(u8, executor, "opencode")) {
-            stdout.print("  opencode run \"<planning prompt>\"\n", .{}) catch {};
-        } else {
-            stdout.print("  {s} \"<planning prompt>\"\n", .{executor}) catch {};
-        }
+        stdout.print("  {s} \"<planning prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd)}) catch {};
         stdout.print("\n--- Prompt Preview ---\n{s}\n", .{prompt}) catch {};
         return;
     }
@@ -221,54 +287,14 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     if (log_file) |*f| f.seekFromEnd(0) catch {};
     defer if (log_file) |f| f.close();
 
-    const logToFile = struct {
-        fn write(alloc: std.mem.Allocator, file: ?std.fs.File, comptime fmt: []const u8, log_args: anytype) void {
-            if (file) |f| {
-                const msg = std.fmt.allocPrint(alloc, fmt, log_args) catch return;
-                defer alloc.free(msg);
-                f.writeAll(msg) catch {};
-            }
-        }
-    }.write;
-
     stdout.print("=== Starting Planning Session ===\n", .{}) catch {};
     stdout.print("Goal: {s}\n", .{description.?}) catch {};
     stdout.print("Executor: {s}\n\n", .{executor}) catch {};
     logToFile(allocator, log_file, "=== Planning session started: {s} ===\n", .{description.?});
 
     // Build and execute command
-    var runner_args = std.ArrayList([]const u8){};
+    var runner_args = buildExecutorArgs(allocator, executor, model, agent_cmd, prompt) catch return Error.OutOfMemory;
     defer runner_args.deinit(allocator);
-
-    if (agent_cmd) |cmd| {
-        var parts = std.mem.splitScalar(u8, cmd, ' ');
-        while (parts.next()) |part| {
-            if (part.len > 0) runner_args.append(allocator, part) catch {};
-        }
-        runner_args.append(allocator, prompt) catch {};
-    } else if (std.mem.eql(u8, executor, "claude")) {
-        runner_args.append(allocator, "claude") catch {};
-        runner_args.append(allocator, "-p") catch {};
-        if (model) |m| {
-            runner_args.append(allocator, "--model") catch {};
-            runner_args.append(allocator, m) catch {};
-        }
-        runner_args.append(allocator, prompt) catch {};
-    } else if (std.mem.eql(u8, executor, "opencode")) {
-        runner_args.append(allocator, "opencode") catch {};
-        runner_args.append(allocator, "run") catch {};
-        if (model) |m| {
-            runner_args.append(allocator, "-m") catch {};
-            runner_args.append(allocator, m) catch {};
-        }
-        runner_args.append(allocator, prompt) catch {};
-    } else {
-        var parts = std.mem.splitScalar(u8, executor, ' ');
-        while (parts.next()) |part| {
-            if (part.len > 0) runner_args.append(allocator, part) catch {};
-        }
-        runner_args.append(allocator, prompt) catch {};
-    }
 
     var child = std.process.Child.init(runner_args.items, allocator);
     child.stdin_behavior = .Inherit;
@@ -280,10 +306,7 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         return Error.SpawnFailed;
     };
 
-    const success = switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
+    const success = term == .Exited and term.Exited == 0;
 
     if (success) {
         stdout.print("\n=== Planning session completed ===\n", .{}) catch {};
@@ -385,16 +408,6 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     if (log_file) |*f| f.seekFromEnd(0) catch {};
     defer if (log_file) |f| f.close();
 
-    const logToFile = struct {
-        fn write(alloc: std.mem.Allocator, file: ?std.fs.File, comptime fmt: []const u8, log_args: anytype) void {
-            if (file) |f| {
-                const msg = std.fmt.allocPrint(alloc, fmt, log_args) catch return;
-                defer alloc.free(msg);
-                f.writeAll(msg) catch {};
-            }
-        }
-    }.write;
-
     var tasks_completed: u32 = 0;
     var consecutive_failures = std.StringHashMap(u32).init(allocator);
     defer {
@@ -462,54 +475,20 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 
         if (dry_run) {
             stdout.print("Would execute:\n", .{}) catch {};
-            if (agent_cmd) |cmd| {
-                stdout.print("  {s} \"<prompt>\"\n", .{cmd}) catch {};
-            } else if (std.mem.eql(u8, executor, "claude")) {
-                stdout.print("  claude -p \"<prompt>\"\n", .{}) catch {};
-            } else if (std.mem.eql(u8, executor, "opencode")) {
-                stdout.print("  opencode run \"<prompt>\"\n", .{}) catch {};
-            } else {
-                stdout.print("  {s} \"<prompt>\"\n", .{executor}) catch {};
-            }
+            stdout.print("  {s} \"<prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd)}) catch {};
             stdout.print("\n", .{}) catch {};
             tasks_completed += 1;
         } else {
             const success = executeTask(allocator, executor, model, agent_cmd, exe_path, task.id, task.content) catch false;
 
             if (success) {
-                // Only allocate key if not already in map
-                const gop = consecutive_failures.getOrPut(task.id) catch {
-                    // Continue even if we can't track failures
-                    tasks_completed += 1;
-                    stdout.print("Task completed successfully\n\n", .{}) catch {};
-                    logToFile(allocator, log_file, "Task {s} completed successfully\n", .{task.id});
-                    continue;
-                };
-                if (gop.found_existing) {
-                    gop.value_ptr.* = 0;
-                } else {
-                    gop.key_ptr.* = allocator.dupe(u8, task.id) catch task.id;
-                    gop.value_ptr.* = 0;
-                }
+                updateFailureCount(allocator, &consecutive_failures, task.id, 0);
                 tasks_completed += 1;
                 stdout.print("Task completed successfully\n\n", .{}) catch {};
                 logToFile(allocator, log_file, "Task {s} completed successfully\n", .{task.id});
             } else {
-                const current_failures = consecutive_failures.get(task.id) orelse 0;
-                const new_failures = current_failures + 1;
-                // Only allocate key if not already in map
-                const gop = consecutive_failures.getOrPut(task.id) catch {
-                    stdout.print("Task failed ({} consecutive failures)\n", .{new_failures}) catch {};
-                    logToFile(allocator, log_file, "Task {s} failed ({} consecutive failures)\n", .{ task.id, new_failures });
-                    continue;
-                };
-                if (gop.found_existing) {
-                    gop.value_ptr.* = new_failures;
-                } else {
-                    gop.key_ptr.* = allocator.dupe(u8, task.id) catch task.id;
-                    gop.value_ptr.* = new_failures;
-                }
-
+                const new_failures = (consecutive_failures.get(task.id) orelse 0) + 1;
+                updateFailureCount(allocator, &consecutive_failures, task.id, new_failures);
                 stdout.print("Task failed ({} consecutive failures)\n", .{new_failures}) catch {};
                 logToFile(allocator, log_file, "Task {s} failed ({} consecutive failures)\n", .{ task.id, new_failures });
                 if (new_failures >= 3) {
@@ -617,42 +596,8 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]con
     const prompt = try createPrompt(allocator, exe_path, task_id, task_content);
     defer allocator.free(prompt);
 
-    var runner_args = std.ArrayList([]const u8){};
+    var runner_args = try buildExecutorArgs(allocator, executor, model, agent_cmd, prompt);
     defer runner_args.deinit(allocator);
-
-    if (agent_cmd) |cmd| {
-        var parts = std.mem.splitScalar(u8, cmd, ' ');
-        while (parts.next()) |part| {
-            if (part.len > 0) {
-                try runner_args.append(allocator, part);
-            }
-        }
-        try runner_args.append(allocator, prompt);
-    } else if (std.mem.eql(u8, executor, "claude")) {
-        try runner_args.append(allocator, "claude");
-        try runner_args.append(allocator, "-p");
-        if (model) |m| {
-            try runner_args.append(allocator, "--model");
-            try runner_args.append(allocator, m);
-        }
-        try runner_args.append(allocator, prompt);
-    } else if (std.mem.eql(u8, executor, "opencode")) {
-        try runner_args.append(allocator, "opencode");
-        try runner_args.append(allocator, "run");
-        if (model) |m| {
-            try runner_args.append(allocator, "-m");
-            try runner_args.append(allocator, m);
-        }
-        try runner_args.append(allocator, prompt);
-    } else {
-        var parts = std.mem.splitScalar(u8, executor, ' ');
-        while (parts.next()) |part| {
-            if (part.len > 0) {
-                try runner_args.append(allocator, part);
-            }
-        }
-        try runner_args.append(allocator, prompt);
-    }
 
     var child = std.process.Child.init(runner_args.items, allocator);
     child.stdin_behavior = .Inherit;
@@ -664,8 +609,5 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]con
         return false;
     };
 
-    return switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
+    return term == .Exited and term.Exited == 0;
 }
