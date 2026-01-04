@@ -397,7 +397,14 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 
     var tasks_completed: u32 = 0;
     var consecutive_failures = std.StringHashMap(u32).init(allocator);
-    defer consecutive_failures.deinit();
+    defer {
+        // Free all the duplicated keys before deiniting the map
+        var key_iter = consecutive_failures.keyIterator();
+        while (key_iter.next()) |key_ptr| {
+            allocator.free(key_ptr.*);
+        }
+        consecutive_failures.deinit();
+    }
 
     stdout.print("Starting RALPH loop...\n", .{}) catch {};
     logToFile(allocator, log_file, "=== RALPH loop started ===\n", .{});
@@ -470,16 +477,38 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             const success = executeTask(allocator, executor, model, agent_cmd, exe_path, task.id, task.content) catch false;
 
             if (success) {
-                const key = allocator.dupe(u8, task.id) catch task.id;
-                consecutive_failures.put(key, 0) catch {};
+                // Only allocate key if not already in map
+                const gop = consecutive_failures.getOrPut(task.id) catch {
+                    // Continue even if we can't track failures
+                    tasks_completed += 1;
+                    stdout.print("Task completed successfully\n\n", .{}) catch {};
+                    logToFile(allocator, log_file, "Task {s} completed successfully\n", .{task.id});
+                    continue;
+                };
+                if (gop.found_existing) {
+                    gop.value_ptr.* = 0;
+                } else {
+                    gop.key_ptr.* = allocator.dupe(u8, task.id) catch task.id;
+                    gop.value_ptr.* = 0;
+                }
                 tasks_completed += 1;
                 stdout.print("Task completed successfully\n\n", .{}) catch {};
                 logToFile(allocator, log_file, "Task {s} completed successfully\n", .{task.id});
             } else {
                 const current_failures = consecutive_failures.get(task.id) orelse 0;
                 const new_failures = current_failures + 1;
-                const key = allocator.dupe(u8, task.id) catch task.id;
-                consecutive_failures.put(key, new_failures) catch {};
+                // Only allocate key if not already in map
+                const gop = consecutive_failures.getOrPut(task.id) catch {
+                    stdout.print("Task failed ({} consecutive failures)\n", .{new_failures}) catch {};
+                    logToFile(allocator, log_file, "Task {s} failed ({} consecutive failures)\n", .{ task.id, new_failures });
+                    continue;
+                };
+                if (gop.found_existing) {
+                    gop.value_ptr.* = new_failures;
+                } else {
+                    gop.key_ptr.* = allocator.dupe(u8, task.id) catch task.id;
+                    gop.value_ptr.* = new_failures;
+                }
 
                 stdout.print("Task failed ({} consecutive failures)\n", .{new_failures}) catch {};
                 logToFile(allocator, log_file, "Task {s} failed ({} consecutive failures)\n", .{ task.id, new_failures });
@@ -542,10 +571,19 @@ fn getPendingTasks(allocator: std.mem.Allocator) !PendingTasks {
     var pending = std.ArrayList(PendingTask){};
     for (parsed.value.tasks) |task| {
         if (!std.mem.eql(u8, task.status, "completed")) {
+            const id_dupe = allocator.dupe(u8, task.id) catch continue;
+            const content_dupe = allocator.dupe(u8, task.content) catch {
+                allocator.free(id_dupe); // Free id if content alloc fails
+                continue;
+            };
             pending.append(allocator, .{
-                .id = allocator.dupe(u8, task.id) catch continue,
-                .content = allocator.dupe(u8, task.content) catch continue,
-            }) catch continue;
+                .id = id_dupe,
+                .content = content_dupe,
+            }) catch {
+                allocator.free(id_dupe);
+                allocator.free(content_dupe);
+                continue;
+            };
         }
     }
 
