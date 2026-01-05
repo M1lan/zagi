@@ -51,24 +51,29 @@ zagi provides two agent subcommands for autonomous task execution using the RALP
 
 ### zagi agent plan
 
-Starts an interactive planning session where an AI agent explores the codebase, asks questions, and creates tasks.
+Starts an interactive planning session where an AI agent collaborates with you to design and create tasks.
 
 ```bash
-# Basic usage - provide a description of what you want to build
+# Start an interactive session (agent will ask what you want to build)
+zagi agent plan
+
+# Start with initial context
 zagi agent plan "Add user authentication with JWT"
 
 # Preview the prompt without executing
-zagi agent plan --dry-run "Refactor database layer"
+zagi agent plan --dry-run
 
 # Specify a model (passed to the executor)
-zagi agent plan --model claude-sonnet-4-20250514 "Add caching layer"
+zagi agent plan --model claude-sonnet-4-20250514
 ```
 
-The planning agent will:
-1. Read AGENTS.md to understand project conventions
-2. Explore the codebase to understand architecture
-3. Create detailed, self-contained tasks using `zagi tasks add`
-4. Each task includes acceptance criteria and verification steps
+The planning agent follows an interactive protocol:
+1. **Gather requirements**: Asks questions to understand what you want to build
+2. **Explore codebase**: Reads AGENTS.md and relevant code to understand architecture
+3. **Propose plan**: Presents a numbered implementation plan for your review
+4. **Create tasks**: Only creates tasks after you explicitly approve the plan
+
+This collaborative approach ensures the agent gathers all necessary context before committing to a task breakdown.
 
 ### zagi agent run
 

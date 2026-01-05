@@ -987,7 +987,7 @@ describe("zagi agent plan ZAGI_AGENT_CMD override", () => {
       env: { ZAGI_AGENT_CMD: "my-planner --interactive" }
     });
 
-    expect(result).toContain("Planning Session (dry-run)");
+    expect(result).toContain("Interactive Planning Session (dry-run)");
     expect(result).toContain("Would execute:");
     expect(result).toContain("my-planner --interactive");
   });
@@ -1011,14 +1011,74 @@ describe("zagi agent plan ZAGI_AGENT_CMD override", () => {
       env: { ZAGI_AGENT_CMD: script }
     });
 
-    expect(result).toContain("Starting Planning Session");
+    expect(result).toContain("Starting Interactive Planning Session");
     expect(result).toContain("Planning session completed");
 
     // Verify script received the planning prompt
     const { readFileSync } = require("fs");
     const logContent = readFileSync(logFile, "utf-8");
-    expect(logContent).toContain("You are a planning agent");
+    expect(logContent).toContain("interactive planning agent");
     expect(logContent).toContain("Test planning execution"); // The description
+  });
+});
+
+// ============================================================================
+// Agent Plan: Interactive Mode (no description required)
+// ============================================================================
+
+describe("zagi agent plan interactive mode", () => {
+  test("works without initial description", () => {
+    const { script, logFile } = createArgLoggingExecutor(REPO_DIR);
+
+    // No description provided - should start interactive session
+    const result = zagi(["agent", "plan"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: script }
+    });
+
+    expect(result).toContain("Starting Interactive Planning Session");
+    expect(result).toContain("Planning session completed");
+
+    // Verify script received the interactive prompt
+    const { readFileSync } = require("fs");
+    const logContent = readFileSync(logFile, "utf-8");
+    expect(logContent).toContain("interactive planning agent");
+    expect(logContent).toContain("start by asking what the user wants to build");
+  });
+
+  test("dry-run without description shows will ask user", () => {
+    const result = zagi(["agent", "plan", "--dry-run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "my-agent" }
+    });
+
+    expect(result).toContain("Interactive Planning Session (dry-run)");
+    expect(result).toContain("Initial context: (none - will ask user)");
+    expect(result).toContain("Would execute:");
+  });
+
+  test("dry-run with description shows the context", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Add auth feature"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "my-agent" }
+    });
+
+    expect(result).toContain("Interactive Planning Session (dry-run)");
+    expect(result).toContain("Initial context: Add auth feature");
+  });
+
+  test("prompt includes interactive protocol phases", () => {
+    const result = zagi(["agent", "plan", "--dry-run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "my-agent" }
+    });
+
+    // Verify the prompt includes the 4-phase protocol
+    expect(result).toContain("PHASE 1: GATHER REQUIREMENTS");
+    expect(result).toContain("PHASE 2: EXPLORE CODEBASE");
+    expect(result).toContain("PHASE 3: PROPOSE PLAN");
+    expect(result).toContain("PHASE 4: CREATE TASKS");
+    expect(result).toContain("NEVER create tasks without explicit user approval");
   });
 });
 
