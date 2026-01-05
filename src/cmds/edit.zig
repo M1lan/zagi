@@ -10,6 +10,7 @@ pub const help =
     \\Commands:
     \\  <commit>                Travel to commit for editing
     \\  --back                  Return to original branch and rebase
+    \\  --continue              Continue after resolving conflicts
     \\  --abort                 Cancel edit and return to original state
     \\  --status                Show current edit state
     \\
@@ -20,6 +21,7 @@ pub const help =
     \\  git edit abc123         Travel to commit abc123 for editing
     \\  git edit HEAD~3         Travel 3 commits back for editing
     \\  git edit --back         Return and rebase descendants
+    \\  git edit --continue     Continue after resolving a conflict
     \\  git edit --abort        Cancel edit session
     \\  git edit --status       Show if edit is active
     \\
@@ -156,6 +158,33 @@ pub fn saveState(repo: ?*c.git_repository, origin: c.git_oid, descendants: []con
     }
 
     // Create the reference pointing to the blob
+    var descendants_ref: ?*c.git_reference = null;
+    if (c.git_reference_create(&descendants_ref, repo, REF_EDIT_DESCENDANTS, &blob_oid, 1, null) < 0) {
+        return Error.RefWriteFailed;
+    }
+    c.git_reference_free(descendants_ref);
+}
+
+/// Update descendants ref with a new list (used when continuing after conflict)
+fn updateDescendants(repo: ?*c.git_repository, descendants: []const c.git_oid, allocator: std.mem.Allocator) Error!void {
+    // Build content: one hex OID per line
+    var content = std.ArrayList(u8){};
+    defer content.deinit(allocator);
+
+    for (descendants) |oid| {
+        var hex: [40]u8 = undefined;
+        _ = c.git_oid_fmt(&hex, &oid);
+        content.appendSlice(allocator, &hex) catch return Error.AllocationError;
+        content.append(allocator, '\n') catch return Error.AllocationError;
+    }
+
+    // Create blob from content
+    var blob_oid: c.git_oid = undefined;
+    if (c.git_blob_create_from_buffer(&blob_oid, repo, content.items.ptr, content.items.len) < 0) {
+        return Error.RefWriteFailed;
+    }
+
+    // Update the reference (force=1 to overwrite)
     var descendants_ref: ?*c.git_reference = null;
     if (c.git_reference_create(&descendants_ref, repo, REF_EDIT_DESCENDANTS, &blob_oid, 1, null) < 0) {
         return Error.RefWriteFailed;
@@ -410,7 +439,7 @@ pub fn completeEdit(repo: ?*c.git_repository, allocator: std.mem.Allocator) Erro
 
     // Cherry-pick each descendant onto current HEAD (oldest first)
     var rebased_count: usize = 0;
-    for (descendants) |old_oid| {
+    for (descendants, 0..) |old_oid, descendant_idx| {
         // Look up the original commit
         var old_commit: ?*c.git_commit = null;
         if (c.git_commit_lookup(&old_commit, repo, &old_oid) < 0) {
@@ -450,6 +479,9 @@ pub fn completeEdit(repo: ?*c.git_repository, allocator: std.mem.Allocator) Erro
                 return Error.RefWriteFailed;
             }
             c.git_reference_free(current_ref);
+
+            // Save remaining descendants (from current index onwards) for --continue
+            try updateDescendants(repo, descendants[descendant_idx..], allocator);
 
             // Write conflicted index to repo
             var repo_index: ?*c.git_index = null;
@@ -796,6 +828,198 @@ pub fn abortEdit(repo: ?*c.git_repository) Error!void {
     stdout.print("restored: {s}\n", .{short_hash[0..7]}) catch return Error.AllocationError;
 }
 
+/// Continue an edit session after resolving conflicts.
+/// Creates a commit from the resolved index and continues cherry-picking remaining descendants.
+pub fn continueEdit(repo: ?*c.git_repository, allocator: std.mem.Allocator) Error!void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+
+    // Check that edit is active
+    if (!isEditActive(repo)) {
+        return Error.EditNotActive;
+    }
+
+    // Check that we're in conflict state (refs/edit/current exists)
+    if (!isConflictActive(repo)) {
+        stdout.print("error: no conflict in progress\n", .{}) catch return Error.AllocationError;
+        stdout.print("hint: use 'git edit --back' to complete the edit\n", .{}) catch return Error.AllocationError;
+        return Error.EditNotActive;
+    }
+
+    // Get current base commit OID
+    const current_oid = getCurrentConflict(repo) orelse return Error.RefReadFailed;
+
+    // Get remaining descendants (first one is the commit that conflicted)
+    const descendants = try getDescendants(repo, allocator);
+    defer allocator.free(descendants);
+
+    if (descendants.len == 0) {
+        stdout.print("error: no commits to continue\n", .{}) catch return Error.AllocationError;
+        return Error.EditNotActive;
+    }
+
+    // Check that index has no conflicts
+    var repo_index: ?*c.git_index = null;
+    if (c.git_repository_index(&repo_index, repo) < 0) {
+        return Error.CherryPickConflict;
+    }
+    defer c.git_index_free(repo_index);
+
+    if (c.git_index_has_conflicts(repo_index) != 0) {
+        stdout.print("error: unresolved conflicts remain\n", .{}) catch return Error.AllocationError;
+        stdout.print("hint: resolve all conflicts then 'git add <files>'\n", .{}) catch return Error.AllocationError;
+        return Error.CherryPickConflict;
+    }
+
+    // Get the original commit that conflicted (first in descendants list)
+    const conflicted_oid = descendants[0];
+    var conflicted_commit: ?*c.git_commit = null;
+    if (c.git_commit_lookup(&conflicted_commit, repo, &conflicted_oid) < 0) {
+        return Error.InvalidCommit;
+    }
+    defer c.git_commit_free(conflicted_commit);
+
+    // Get the base commit
+    var base_commit: ?*c.git_commit = null;
+    if (c.git_commit_lookup(&base_commit, repo, &current_oid) < 0) {
+        return Error.InvalidCommit;
+    }
+    defer c.git_commit_free(base_commit);
+
+    // Write tree from resolved index
+    var tree_oid: c.git_oid = undefined;
+    if (c.git_index_write_tree(&tree_oid, repo_index) < 0) {
+        return Error.CherryPickConflict;
+    }
+
+    var tree: ?*c.git_tree = null;
+    if (c.git_tree_lookup(&tree, repo, &tree_oid) < 0) {
+        return Error.CherryPickConflict;
+    }
+    defer c.git_tree_free(tree);
+
+    // Get original commit message and author
+    const message = c.git_commit_message(conflicted_commit);
+    const author = c.git_commit_author(conflicted_commit);
+
+    // Get committer (current user)
+    var committer: ?*c.git_signature = null;
+    if (c.git_signature_default(&committer, repo) < 0) {
+        return Error.CherryPickConflict;
+    }
+    defer c.git_signature_free(committer);
+
+    // Create new commit with same message/author but new parent
+    var new_oid: c.git_oid = undefined;
+    var parents = [_]?*c.git_commit{base_commit};
+
+    if (c.git_commit_create(
+        &new_oid,
+        repo,
+        null, // Don't update any ref yet
+        author,
+        committer,
+        null, // UTF-8 encoding
+        message,
+        tree,
+        1,
+        @ptrCast(&parents),
+    ) < 0) {
+        return Error.CherryPickConflict;
+    }
+
+    // Update refs/edit/current to the new commit
+    var current_ref: ?*c.git_reference = null;
+    if (c.git_reference_create(&current_ref, repo, REF_EDIT_CURRENT, &new_oid, 1, null) < 0) {
+        return Error.RefWriteFailed;
+    }
+    c.git_reference_free(current_ref);
+
+    // Update HEAD to point to the new commit
+    if (c.git_repository_set_head_detached(repo, &new_oid) < 0) {
+        return Error.RefWriteFailed;
+    }
+
+    // Remove the first descendant (we just applied it) and update the list
+    if (descendants.len > 1) {
+        try updateDescendants(repo, descendants[1..], allocator);
+    } else {
+        // No more descendants - clear to empty
+        try updateDescendants(repo, &[_]c.git_oid{}, allocator);
+    }
+
+    // Delete refs/edit/current since we're done with conflict resolution
+    var del_ref: ?*c.git_reference = null;
+    if (c.git_reference_lookup(&del_ref, repo, REF_EDIT_CURRENT) == 0) {
+        _ = c.git_reference_delete(del_ref);
+        c.git_reference_free(del_ref);
+    }
+
+    stdout.print("continued: 1 commit applied\n", .{}) catch return Error.AllocationError;
+
+    // If there are more descendants, continue with completeEdit
+    if (descendants.len > 1) {
+        stdout.print("remaining: {d} commits\n", .{descendants.len - 1}) catch return Error.AllocationError;
+        // Call completeEdit to continue cherry-picking
+        try completeEdit(repo, allocator);
+    } else {
+        // All done - finish up like completeEdit does
+        // Find original branch and restore HEAD
+        const origin_oid = getOrigin(repo) orelse return Error.RefReadFailed;
+
+        // Find the branch that was at origin_oid
+        var branch_name: ?[]const u8 = null;
+        var branch_name_buf: [256]u8 = undefined;
+
+        var branch_iter: ?*c.git_branch_iterator = null;
+        if (c.git_branch_iterator_new(&branch_iter, repo, c.GIT_BRANCH_LOCAL) == 0) {
+            defer c.git_branch_iterator_free(branch_iter);
+
+            var ref: ?*c.git_reference = null;
+            var branch_type: c.git_branch_t = undefined;
+            while (c.git_branch_next(&ref, &branch_type, branch_iter) == 0) {
+                defer c.git_reference_free(ref);
+                const target = c.git_reference_target(ref);
+                if (target != null and c.git_oid_equal(target, &origin_oid) != 0) {
+                    const name_ptr = c.git_reference_shorthand(ref);
+                    if (name_ptr != null) {
+                        const name = std.mem.sliceTo(name_ptr, 0);
+                        @memcpy(branch_name_buf[0..name.len], name);
+                        branch_name = branch_name_buf[0..name.len];
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Update branch and restore HEAD
+        if (branch_name) |name| {
+            var ref_name_buf: [512]u8 = undefined;
+            const ref_name = std.fmt.bufPrint(&ref_name_buf, "refs/heads/{s}", .{name}) catch return Error.AllocationError;
+
+            var ref_name_z: [512]u8 = undefined;
+            @memcpy(ref_name_z[0..ref_name.len], ref_name);
+            ref_name_z[ref_name.len] = 0;
+
+            // Update branch to point to new commit
+            var new_ref: ?*c.git_reference = null;
+            if (c.git_reference_create(&new_ref, repo, &ref_name_z, &new_oid, 1, "edit --continue: rebase complete") < 0) {
+                return Error.RefWriteFailed;
+            }
+            c.git_reference_free(new_ref);
+
+            // Re-attach HEAD to the branch
+            if (c.git_repository_set_head(repo, &ref_name_z) < 0) {
+                return Error.RefWriteFailed;
+            }
+        }
+
+        // Clear edit state
+        try clearState(repo);
+
+        stdout.print("edit: complete\n", .{}) catch return Error.AllocationError;
+    }
+}
+
 /// Main entry point for the edit command
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -805,6 +1029,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     var do_back = false;
     var do_abort = false;
     var do_status = false;
+    var do_continue = false;
 
     for (args[2..]) |arg| {
         const a = std.mem.sliceTo(arg, 0);
@@ -817,11 +1042,19 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             do_abort = true;
         } else if (std.mem.eql(u8, a, "--status")) {
             do_status = true;
+        } else if (std.mem.eql(u8, a, "--continue")) {
+            do_continue = true;
         } else if (!std.mem.startsWith(u8, a, "-")) {
             target = a;
         } else {
             return git.Error.UsageError;
         }
+    }
+
+    // No arguments - show help
+    if (!do_back and !do_abort and !do_status and !do_continue and target == null) {
+        stdout.print("{s}", .{help}) catch {};
+        return;
     }
 
     // Initialize libgit2
@@ -840,13 +1073,13 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     // Dispatch to appropriate action
     if (do_back) {
         try completeEdit(repo, allocator);
+    } else if (do_continue) {
+        try continueEdit(repo, allocator);
     } else if (do_abort) {
         try abortEdit(repo);
     } else if (do_status) {
         try showStatus(repo, allocator);
     } else if (target) |t| {
         try startEdit(repo, t, allocator);
-    } else {
-        return git.Error.UsageError;
     }
 }
