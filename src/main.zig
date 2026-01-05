@@ -210,6 +210,10 @@ fn handleError(err: anyerror, cmd: Command) void {
             stderr.print("error: invalid commit reference\n", .{}) catch {};
             break :blk 1;
         },
+        edit.Error.CherryPickConflictExit => blk: {
+            // Message already printed by completeEdit
+            break :blk 2;
+        },
         error.OutOfMemory => blk: {
             stderr.print("fatal: out of memory\n", .{}) catch {};
             break :blk 1;

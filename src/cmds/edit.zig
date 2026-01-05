@@ -31,6 +31,7 @@ pub const Error = git.Error || error{
     DirtyWorkingTree,
     NotAnAncestor,
     CherryPickConflict,
+    CherryPickConflictExit, // Special error for exit code 2
     DetachedHead,
     InvalidCommit,
     RefReadFailed,
@@ -42,6 +43,7 @@ pub const Error = git.Error || error{
 // Ref names for edit state
 const REF_EDIT_ORIGIN = "refs/edit/origin";
 const REF_EDIT_DESCENDANTS = "refs/edit/descendants";
+const REF_EDIT_CURRENT = "refs/edit/current";
 
 /// Check if an edit session is currently active
 pub fn isEditActive(repo: ?*c.git_repository) bool {
@@ -181,6 +183,16 @@ pub fn clearState(repo: ?*c.git_repository) Error!void {
             return Error.RefDeleteFailed;
         }
         c.git_reference_free(descendants_ref);
+    }
+
+    // Delete current ref (used during conflict resolution)
+    var current_ref: ?*c.git_reference = null;
+    if (c.git_reference_lookup(&current_ref, repo, REF_EDIT_CURRENT) == 0) {
+        if (c.git_reference_delete(current_ref) < 0) {
+            c.git_reference_free(current_ref);
+            return Error.RefDeleteFailed;
+        }
+        c.git_reference_free(current_ref);
     }
 }
 
@@ -334,12 +346,291 @@ pub fn startEdit(repo: ?*c.git_repository, target_str: []const u8, allocator: st
     stdout.print("descendants: {d} commits\n", .{descendants.len}) catch return Error.AllocationError;
 }
 
+/// Complete an edit session - cherry-pick descendants onto current HEAD.
+/// Returns CherryPickConflictExit if there's a conflict that needs resolution (exit code 2).
+pub fn completeEdit(repo: ?*c.git_repository, allocator: std.mem.Allocator) Error!void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+
+    // Check that edit is active
+    if (!isEditActive(repo)) {
+        return Error.EditNotActive;
+    }
+
+    // Check for uncommitted changes
+    if (git.countUncommitted(repo)) |counts| {
+        if (counts.total() > 0) {
+            return Error.DirtyWorkingTree;
+        }
+    }
+
+    // Load state from refs
+    const origin_oid = getOrigin(repo) orelse return Error.RefReadFailed;
+    const descendants = try getDescendants(repo, allocator);
+    defer allocator.free(descendants);
+
+    // Get current HEAD OID (this is our new base after editing)
+    var head_ref: ?*c.git_reference = null;
+    if (c.git_repository_head(&head_ref, repo) < 0) {
+        return Error.DetachedHead;
+    }
+    defer c.git_reference_free(head_ref);
+
+    const head_oid_ptr = c.git_reference_target(head_ref);
+    if (head_oid_ptr == null) {
+        return Error.DetachedHead;
+    }
+    var current_oid = head_oid_ptr.*;
+
+    // Get the original branch name from origin ref (stored before detaching)
+    // We need to find what branch was at origin_oid
+    var branch_name: ?[]const u8 = null;
+    var branch_name_buf: [256]u8 = undefined;
+
+    // Iterate through branches to find the one matching origin_oid
+    var branch_iter: ?*c.git_branch_iterator = null;
+    if (c.git_branch_iterator_new(&branch_iter, repo, c.GIT_BRANCH_LOCAL) == 0) {
+        defer c.git_branch_iterator_free(branch_iter);
+
+        var ref: ?*c.git_reference = null;
+        var branch_type: c.git_branch_t = undefined;
+        while (c.git_branch_next(&ref, &branch_type, branch_iter) == 0) {
+            defer c.git_reference_free(ref);
+            const target = c.git_reference_target(ref);
+            if (target != null and c.git_oid_equal(target, &origin_oid) != 0) {
+                const name_ptr = c.git_reference_shorthand(ref);
+                if (name_ptr != null) {
+                    const name = std.mem.sliceTo(name_ptr, 0);
+                    @memcpy(branch_name_buf[0..name.len], name);
+                    branch_name = branch_name_buf[0..name.len];
+                    break;
+                }
+            }
+        }
+    }
+
+    // Cherry-pick each descendant onto current HEAD (oldest first)
+    var rebased_count: usize = 0;
+    for (descendants) |old_oid| {
+        // Look up the original commit
+        var old_commit: ?*c.git_commit = null;
+        if (c.git_commit_lookup(&old_commit, repo, &old_oid) < 0) {
+            return Error.InvalidCommit;
+        }
+        defer c.git_commit_free(old_commit);
+
+        // Look up the current base commit
+        var base_commit: ?*c.git_commit = null;
+        if (c.git_commit_lookup(&base_commit, repo, &current_oid) < 0) {
+            return Error.InvalidCommit;
+        }
+        defer c.git_commit_free(base_commit);
+
+        // Get the parent of the old commit (for cherry-pick diff)
+        var old_parent: ?*c.git_commit = null;
+        if (c.git_commit_parent(&old_parent, old_commit, 0) < 0) {
+            return Error.InvalidCommit;
+        }
+        defer c.git_commit_free(old_parent);
+
+        // Cherry-pick: apply the diff from old_parent->old_commit onto base_commit
+        var cherry_index: ?*c.git_index = null;
+        var merge_opts = std.mem.zeroes(c.git_merge_options);
+        merge_opts.version = c.GIT_MERGE_OPTIONS_VERSION;
+
+        if (c.git_cherrypick_commit(&cherry_index, repo, old_commit, base_commit, 0, &merge_opts) < 0) {
+            return Error.CherryPickConflict;
+        }
+        defer c.git_index_free(cherry_index);
+
+        // Check for conflicts
+        if (c.git_index_has_conflicts(cherry_index) != 0) {
+            // Save current position to refs/edit/current for --continue
+            var current_ref: ?*c.git_reference = null;
+            if (c.git_reference_create(&current_ref, repo, REF_EDIT_CURRENT, &current_oid, 1, null) < 0) {
+                return Error.RefWriteFailed;
+            }
+            c.git_reference_free(current_ref);
+
+            // Write conflicted index to repo
+            var repo_index: ?*c.git_index = null;
+            if (c.git_repository_index(&repo_index, repo) < 0) {
+                return Error.CherryPickConflict;
+            }
+            defer c.git_index_free(repo_index);
+
+            // Copy cherry-pick index entries to repo index
+            if (c.git_index_read_tree(repo_index, null) == 0) {
+                // Clear and copy
+                _ = c.git_index_clear(repo_index);
+            }
+
+            // Write the cherry index to disk for conflict resolution
+            const entry_count = c.git_index_entrycount(cherry_index);
+            for (0..entry_count) |idx| {
+                const entry = c.git_index_get_byindex(cherry_index, idx);
+                if (entry != null) {
+                    _ = c.git_index_add(repo_index, entry);
+                }
+            }
+            _ = c.git_index_write(repo_index);
+
+            // Checkout the conflicted state to working tree
+            var checkout_opts: c.git_checkout_options = undefined;
+            _ = c.git_checkout_options_init(&checkout_opts, c.GIT_CHECKOUT_OPTIONS_VERSION);
+            checkout_opts.checkout_strategy = c.GIT_CHECKOUT_FORCE | c.GIT_CHECKOUT_ALLOW_CONFLICTS;
+            _ = c.git_checkout_index(repo, cherry_index, &checkout_opts);
+
+            // Print conflict message
+            stdout.print("conflict: cherry-pick failed\n", .{}) catch return Error.AllocationError;
+            stdout.print("resolve conflicts then:\n", .{}) catch return Error.AllocationError;
+            stdout.print("  git add <files>\n", .{}) catch return Error.AllocationError;
+            stdout.print("  git edit --continue\n", .{}) catch return Error.AllocationError;
+            stdout.print("or:\n", .{}) catch return Error.AllocationError;
+            stdout.print("  git edit --abort\n", .{}) catch return Error.AllocationError;
+
+            return Error.CherryPickConflictExit; // Exit code 2 for conflict
+        }
+
+        // No conflicts - write tree and create new commit
+        var tree_oid: c.git_oid = undefined;
+        if (c.git_index_write_tree_to(&tree_oid, cherry_index, repo) < 0) {
+            return Error.CherryPickConflict;
+        }
+
+        var tree: ?*c.git_tree = null;
+        if (c.git_tree_lookup(&tree, repo, &tree_oid) < 0) {
+            return Error.CherryPickConflict;
+        }
+        defer c.git_tree_free(tree);
+
+        // Get original commit message and author
+        const message = c.git_commit_message(old_commit);
+        const author = c.git_commit_author(old_commit);
+
+        // Get committer (current user)
+        var committer: ?*c.git_signature = null;
+        if (c.git_signature_default(&committer, repo) < 0) {
+            return Error.CherryPickConflict;
+        }
+        defer c.git_signature_free(committer);
+
+        // Create new commit with same message/author but new parent
+        var new_oid: c.git_oid = undefined;
+        var parents = [_]?*c.git_commit{base_commit};
+
+        if (c.git_commit_create(
+            &new_oid,
+            repo,
+            null, // Don't update any ref yet
+            author,
+            committer,
+            null, // UTF-8 encoding
+            message,
+            tree,
+            1,
+            @ptrCast(&parents),
+        ) < 0) {
+            return Error.CherryPickConflict;
+        }
+
+        // Update current_oid for next iteration
+        current_oid = new_oid;
+        rebased_count += 1;
+    }
+
+    // All cherry-picks succeeded - update the branch ref to final commit
+    if (branch_name) |name| {
+        // Build full ref name
+        var ref_name_buf: [512]u8 = undefined;
+        const ref_name = std.fmt.bufPrint(&ref_name_buf, "refs/heads/{s}", .{name}) catch return Error.AllocationError;
+
+        var ref_name_z: [512]u8 = undefined;
+        @memcpy(ref_name_z[0..ref_name.len], ref_name);
+        ref_name_z[ref_name.len] = 0;
+
+        // Update branch to point to new commit
+        var new_ref: ?*c.git_reference = null;
+        if (c.git_reference_create(&new_ref, repo, &ref_name_z, &current_oid, 1, "edit --back: rebase complete") < 0) {
+            return Error.RefWriteFailed;
+        }
+        c.git_reference_free(new_ref);
+
+        // Checkout the new HEAD
+        var checkout_opts: c.git_checkout_options = undefined;
+        _ = c.git_checkout_options_init(&checkout_opts, c.GIT_CHECKOUT_OPTIONS_VERSION);
+        checkout_opts.checkout_strategy = c.GIT_CHECKOUT_SAFE;
+
+        var final_commit: ?*c.git_commit = null;
+        if (c.git_commit_lookup(&final_commit, repo, &current_oid) < 0) {
+            return Error.InvalidCommit;
+        }
+        defer c.git_commit_free(final_commit);
+
+        var final_tree: ?*c.git_tree = null;
+        if (c.git_commit_tree(&final_tree, final_commit) < 0) {
+            return Error.InvalidCommit;
+        }
+        defer c.git_tree_free(final_tree);
+
+        if (c.git_checkout_tree(repo, @ptrCast(final_tree), &checkout_opts) < 0) {
+            return Error.InvalidCommit;
+        }
+
+        // Re-attach HEAD to the branch
+        var symbolic_name_buf: [512]u8 = undefined;
+        const symbolic_ref = std.fmt.bufPrint(&symbolic_name_buf, "refs/heads/{s}", .{name}) catch return Error.AllocationError;
+        var symbolic_z: [512]u8 = undefined;
+        @memcpy(symbolic_z[0..symbolic_ref.len], symbolic_ref);
+        symbolic_z[symbolic_ref.len] = 0;
+
+        if (c.git_repository_set_head(repo, &symbolic_z) < 0) {
+            return Error.RefWriteFailed;
+        }
+    } else {
+        // No branch found - just update detached HEAD
+        if (c.git_repository_set_head_detached(repo, &current_oid) < 0) {
+            return Error.RefWriteFailed;
+        }
+
+        // Checkout the new HEAD
+        var checkout_opts: c.git_checkout_options = undefined;
+        _ = c.git_checkout_options_init(&checkout_opts, c.GIT_CHECKOUT_OPTIONS_VERSION);
+        checkout_opts.checkout_strategy = c.GIT_CHECKOUT_SAFE;
+
+        var final_commit: ?*c.git_commit = null;
+        if (c.git_commit_lookup(&final_commit, repo, &current_oid) < 0) {
+            return Error.InvalidCommit;
+        }
+        defer c.git_commit_free(final_commit);
+
+        var final_tree: ?*c.git_tree = null;
+        if (c.git_commit_tree(&final_tree, final_commit) < 0) {
+            return Error.InvalidCommit;
+        }
+        defer c.git_tree_free(final_tree);
+
+        if (c.git_checkout_tree(repo, @ptrCast(final_tree), &checkout_opts) < 0) {
+            return Error.InvalidCommit;
+        }
+    }
+
+    // Clear edit state
+    try clearState(repo);
+
+    // Output success
+    stdout.print("edit: complete\n", .{}) catch return Error.AllocationError;
+    stdout.print("rebased: {d} commits\n", .{rebased_count}) catch return Error.AllocationError;
+}
+
 /// Main entry point for the edit command
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
 
     // Parse arguments
     var target: ?[]const u8 = null;
+    var do_back = false;
+    var do_abort = false;
+    var do_status = false;
 
     for (args[2..]) |arg| {
         const a = std.mem.sliceTo(arg, 0);
@@ -347,24 +638,16 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             stdout.print("{s}", .{help}) catch {};
             return;
         } else if (std.mem.eql(u8, a, "--back")) {
-            // TODO: Implement comeBack()
-            return git.Error.UsageError;
+            do_back = true;
         } else if (std.mem.eql(u8, a, "--abort")) {
-            // TODO: Implement abortEdit()
-            return git.Error.UsageError;
+            do_abort = true;
         } else if (std.mem.eql(u8, a, "--status")) {
-            // TODO: Implement showStatus()
-            return git.Error.UsageError;
+            do_status = true;
         } else if (!std.mem.startsWith(u8, a, "-")) {
             target = a;
         } else {
             return git.Error.UsageError;
         }
-    }
-
-    // Require a target commit
-    if (target == null) {
-        return git.Error.UsageError;
     }
 
     // Initialize libgit2
@@ -380,6 +663,18 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
     defer c.git_repository_free(repo);
 
-    // Start the edit session
-    try startEdit(repo, target.?, allocator);
+    // Dispatch to appropriate action
+    if (do_back) {
+        try completeEdit(repo, allocator);
+    } else if (do_abort) {
+        // TODO: Implement abortEdit()
+        return git.Error.UsageError;
+    } else if (do_status) {
+        // TODO: Implement showStatus()
+        return git.Error.UsageError;
+    } else if (target) |t| {
+        try startEdit(repo, t, allocator);
+    } else {
+        return git.Error.UsageError;
+    }
 }
