@@ -85,12 +85,19 @@ fn logToFile(allocator: std.mem.Allocator, file: ?std.fs.File, comptime fmt: []c
 
 /// Builds command arguments for the specified executor.
 /// Returns an ArrayList that the caller must deinit.
+///
+/// The `interactive` parameter controls whether the executor runs in interactive
+/// mode (user can converse with agent) or headless mode (non-interactive, for
+/// autonomous task execution):
+/// - interactive=true: Claude runs without -p, opencode uses plain mode
+/// - interactive=false: Claude runs with -p (print mode), opencode uses run mode
 fn buildExecutorArgs(
     allocator: std.mem.Allocator,
     executor: []const u8,
     model: ?[]const u8,
     agent_cmd: ?[]const u8,
     prompt: []const u8,
+    interactive: bool,
 ) !std.ArrayList([]const u8) {
     var args = std.ArrayList([]const u8){};
     errdefer args.deinit(allocator);
@@ -103,7 +110,10 @@ fn buildExecutorArgs(
         try args.append(allocator, prompt);
     } else if (std.mem.eql(u8, executor, "claude")) {
         try args.append(allocator, "claude");
-        try args.append(allocator, "-p");
+        if (!interactive) {
+            // Use -p (print mode) for headless/non-interactive execution
+            try args.append(allocator, "-p");
+        }
         if (model) |m| {
             try args.append(allocator, "--model");
             try args.append(allocator, m);
@@ -111,7 +121,10 @@ fn buildExecutorArgs(
         try args.append(allocator, prompt);
     } else if (std.mem.eql(u8, executor, "opencode")) {
         try args.append(allocator, "opencode");
-        try args.append(allocator, "run");
+        if (!interactive) {
+            // Use 'run' subcommand for headless execution
+            try args.append(allocator, "run");
+        }
         if (model) |m| {
             try args.append(allocator, "-m");
             try args.append(allocator, m);
@@ -130,10 +143,15 @@ fn buildExecutorArgs(
 }
 
 /// Formats the executor command for dry-run display.
-fn formatExecutorCommand(executor: []const u8, agent_cmd: ?[]const u8) []const u8 {
+/// The `interactive` parameter mirrors the buildExecutorArgs behavior.
+fn formatExecutorCommand(executor: []const u8, agent_cmd: ?[]const u8, interactive: bool) []const u8 {
     if (agent_cmd) |cmd| return cmd;
-    if (std.mem.eql(u8, executor, "claude")) return "claude -p";
-    if (std.mem.eql(u8, executor, "opencode")) return "opencode run";
+    if (std.mem.eql(u8, executor, "claude")) {
+        return if (interactive) "claude" else "claude -p";
+    }
+    if (std.mem.eql(u8, executor, "opencode")) {
+        return if (interactive) "opencode" else "opencode run";
+    }
     return executor;
 }
 
@@ -372,7 +390,7 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             stdout.print("Initial context: (none - will ask user)\n\n", .{}) catch {};
         }
         stdout.print("Would execute:\n", .{}) catch {};
-        stdout.print("  {s} \"<planning prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd)}) catch {};
+        stdout.print("  {s} \"<planning prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, true)}) catch {};
         stdout.print("\n--- Prompt Preview ---\n{s}\n", .{prompt}) catch {};
         return;
     }
@@ -394,8 +412,8 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         logToFile(allocator, log_file, "Initial context: {s}\n", .{ctx});
     }
 
-    // Build and execute command
-    var runner_args = buildExecutorArgs(allocator, executor, model, agent_cmd, prompt) catch return Error.OutOfMemory;
+    // Build and execute command in interactive mode (user converses with agent)
+    var runner_args = buildExecutorArgs(allocator, executor, model, agent_cmd, prompt, true) catch return Error.OutOfMemory;
     defer runner_args.deinit(allocator);
 
     var child = std.process.Child.init(runner_args.items, allocator);
@@ -618,7 +636,7 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 
         if (dry_run) {
             stdout.print("Would execute:\n", .{}) catch {};
-            stdout.print("  {s} \"<prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd)}) catch {};
+            stdout.print("  {s} \"<prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, false)}) catch {};
             stdout.print("\n", .{}) catch {};
             tasks_completed += 1;
         } else {
@@ -750,7 +768,8 @@ fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]con
     const prompt = try createPrompt(allocator, executor, exe_path, task_id, task_content);
     defer allocator.free(prompt);
 
-    var runner_args = try buildExecutorArgs(allocator, executor, model, agent_cmd, prompt);
+    // Use headless mode (interactive=false) for autonomous task execution
+    var runner_args = try buildExecutorArgs(allocator, executor, model, agent_cmd, prompt, false);
     defer runner_args.deinit(allocator);
 
     var child = std.process.Child.init(runner_args.items, allocator);
