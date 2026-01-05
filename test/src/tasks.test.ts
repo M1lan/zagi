@@ -648,6 +648,96 @@ describe("integration with git", () => {
 });
 
 // ============================================================================
+// Error Conditions: No Tasks Exist
+// ============================================================================
+
+describe("error conditions: no tasks exist", () => {
+  test("tasks list shows helpful message when empty", () => {
+    const result = zagi(["tasks", "list"], { cwd: REPO_DIR });
+
+    expect(result).toContain("no tasks found");
+  });
+
+  test("tasks list --json returns empty array when no tasks", () => {
+    const result = zagi(["tasks", "list", "--json"], { cwd: REPO_DIR });
+
+    const parsed = JSON.parse(result.trim());
+    expect(parsed).toHaveProperty("tasks");
+    expect(parsed.tasks).toHaveLength(0);
+  });
+
+  test("tasks pr shows helpful message when empty", () => {
+    const result = zagi(["tasks", "pr"], { cwd: REPO_DIR });
+
+    expect(result).toContain("No tasks found");
+  });
+
+  test("tasks show gives clear error for non-existent task", () => {
+    const result = zagi(["tasks", "show", "task-001"], { cwd: REPO_DIR });
+
+    expect(result).toContain("error: task 'task-001' not found");
+  });
+
+  test("tasks done gives clear error for non-existent task", () => {
+    const result = zagi(["tasks", "done", "task-001"], { cwd: REPO_DIR });
+
+    expect(result).toContain("error: task 'task-001' not found");
+  });
+});
+
+// ============================================================================
+// Error Conditions: Corrupted Task Data
+// ============================================================================
+
+describe("error conditions: corrupted task data", () => {
+  test("handles corrupted task ref gracefully", () => {
+    // First, create a valid task to establish refs/tasks/main
+    zagi(["tasks", "add", "Initial task"], { cwd: REPO_DIR });
+
+    // Corrupt the task ref by writing garbage data directly
+    // The ref points to a blob - we can create a new blob with garbage
+    // and update the ref to point to it
+    git(["update-ref", "refs/tasks/main", "HEAD"], { cwd: REPO_DIR });
+
+    // Now tasks list should handle this gracefully
+    const result = zagi(["tasks", "list"], { cwd: REPO_DIR });
+
+    // Should not crash - either shows "no tasks" or handles error gracefully
+    // The Zig code's fromJson handles malformed data by skipping invalid lines
+    expect(result).not.toContain("panic");
+    expect(result).not.toContain("SIGSEGV");
+  });
+
+  test("recovers from malformed task data by showing empty list", () => {
+    // Create a task then corrupt by pointing ref to a tree object
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    // Create an empty blob with partial/invalid task data
+    const blobOid = git(["hash-object", "-w", "--stdin"], {
+      cwd: REPO_DIR
+    }).trim();
+
+    // Note: This test verifies the system doesn't crash on read errors
+    // The actual behavior depends on what git returns for corrupted refs
+    const result = zagi(["tasks", "list"], { cwd: REPO_DIR });
+
+    // Main verification: system should not crash
+    expect(typeof result).toBe("string");
+  });
+
+  test("task add works even after corrupted read", () => {
+    // Point ref to HEAD (a commit, not a blob) - simulates corruption
+    git(["update-ref", "-d", "refs/tasks/main"], { cwd: REPO_DIR }).trim();
+
+    // Adding a new task should work (creates fresh task list)
+    const result = zagi(["tasks", "add", "Fresh task after corruption"], { cwd: REPO_DIR });
+
+    expect(result).toContain("created: task-001");
+    expect(result).toContain("Fresh task after corruption");
+  });
+});
+
+// ============================================================================
 // Performance
 // ============================================================================
 

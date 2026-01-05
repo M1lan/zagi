@@ -644,3 +644,126 @@ describe("zagi agent plan ZAGI_AGENT_CMD override", () => {
     expect(logContent).toContain("Test planning execution"); // The description
   });
 });
+
+// ============================================================================
+// Error Conditions: Executor Not Found
+// ============================================================================
+
+describe("error conditions: executor not found", () => {
+  test("agent run shows error when executor command not found", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    // Use a non-existent command
+    const result = zagi(["agent", "run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "/nonexistent/command/that/does/not/exist" }
+    });
+
+    // Should show error about execution failure
+    expect(result).toMatch(/error|fail|unable/i);
+  });
+
+  test("agent plan shows error when executor command not found", () => {
+    // Use a non-existent command
+    const result = zagi(["agent", "plan", "Test plan"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "/nonexistent/command/that/does/not/exist" }
+    });
+
+    // Should show error about execution failure
+    expect(result).toMatch(/error|fail/i);
+  });
+
+  test("agent run handles executor that exits with error code", () => {
+    const failScript = createFailureExecutor(REPO_DIR);
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: failScript }
+    });
+
+    expect(result).toContain("Task failed (1 consecutive failures)");
+  });
+
+  test("agent run continues after executor failure with remaining tasks", () => {
+    const failScript = createFailureExecutor(REPO_DIR);
+    zagi(["tasks", "add", "Task 1"], { cwd: REPO_DIR });
+    zagi(["tasks", "add", "Task 2"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--max-tasks", "4", "--delay", "0"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: failScript }
+    });
+
+    // Should attempt multiple tasks even when failing
+    expect(result).toContain("Starting task:");
+    expect(result).toContain("Task failed");
+  });
+
+  test("dry-run mode works even with non-existent executor", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    // Dry-run should succeed without trying to execute
+    const result = zagi(["agent", "run", "--dry-run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "/nonexistent/command" }
+    });
+
+    expect(result).toContain("dry-run mode");
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("Starting task: task-001");
+    expect(result).not.toContain("error");
+  });
+});
+
+// ============================================================================
+// Error Conditions: No Tasks Exist (Agent Run)
+// ============================================================================
+
+describe("error conditions: no tasks exist (agent run)", () => {
+  test("agent run shows helpful message when no tasks", () => {
+    const executor = createSuccessExecutor(REPO_DIR);
+
+    const result = zagi(["agent", "run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: executor }
+    });
+
+    expect(result).toContain("No pending tasks remaining");
+    expect(result).toContain("All tasks complete");
+  });
+
+  test("agent run with --once shows clear message when no tasks", () => {
+    const executor = createSuccessExecutor(REPO_DIR);
+
+    const result = zagi(["agent", "run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: executor }
+    });
+
+    expect(result).toContain("No pending tasks remaining");
+    expect(result).toContain("All tasks complete");
+  });
+
+  test("agent run suggests next action when no tasks", () => {
+    const executor = createSuccessExecutor(REPO_DIR);
+
+    const result = zagi(["agent", "run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: executor }
+    });
+
+    // Should suggest viewing tasks with pr command
+    expect(result).toContain("zagi tasks pr");
+  });
+
+  test("agent run dry-run shows no tasks message", () => {
+    const result = zagi(["agent", "run", "--dry-run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("No pending tasks remaining");
+  });
+});
