@@ -200,18 +200,19 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 /// Planning prompt template for the `zagi agent plan` subcommand.
 ///
 /// This prompt instructs an AI agent to conduct an INTERACTIVE planning session
-/// where it gathers requirements from the user through questions before creating
-/// any tasks. The session is collaborative - the agent explores the codebase,
-/// asks clarifying questions, and only creates tasks after user approval.
+/// where it explores the codebase first, then gathers requirements from the user
+/// through informed questions before creating any tasks. The session is collaborative
+/// - the agent understands the architecture, asks targeted questions, and only
+/// creates tasks after user approval.
 ///
 /// Template placeholders:
 /// - {0s}: Optional initial context from the user (may be empty)
 /// - {1s}: Absolute path to the zagi binary (for task creation commands)
 ///
 /// The planning agent follows a strict protocol:
-/// 1. GATHER: Ask questions to understand requirements
-/// 2. EXPLORE: Read the codebase to understand architecture
-/// 3. PROPOSE: Present a numbered plan for user review
+/// 1. EXPLORE: Read the codebase to understand architecture FIRST
+/// 2. GATHER: Ask informed questions based on codebase exploration
+/// 3. PROPOSE: Present a numbered plan referencing specific files/patterns
 /// 4. CONFIRM: Only create tasks after explicit approval
 const planning_prompt_template =
     \\You are an interactive planning agent. Your job is to collaboratively design
@@ -221,27 +222,32 @@ const planning_prompt_template =
     \\
     \\=== INTERACTIVE PLANNING PROTOCOL ===
     \\
-    \\PHASE 1: GATHER REQUIREMENTS
-    \\Start by understanding what the user wants to build:
-    \\- If initial context was provided, acknowledge it and ask clarifying questions
+    \\PHASE 1: EXPLORE CODEBASE (do this FIRST, before asking questions)
+    \\Before asking any questions, silently explore the codebase to understand:
+    \\- Read AGENTS.md for project conventions, build commands, and patterns
+    \\- Examine the directory structure to understand the project layout
+    \\- Identify key files and their purposes
+    \\- Understand the current architecture and patterns in use
+    \\- Find existing code related to the initial context (if provided)
+    \\- Note any relevant tests, configs, or documentation
+    \\
+    \\This exploration helps you ask informed questions and propose realistic plans.
+    \\
+    \\PHASE 2: GATHER REQUIREMENTS (with codebase context)
+    \\Now engage the user with informed questions:
+    \\- If initial context was provided, acknowledge it and share relevant findings
+    \\  from your exploration (e.g., "I see you already have X in src/foo.zig...")
     \\- If no context, ask "What would you like to build or accomplish?"
-    \\- Ask follow-up questions about:
+    \\- Ask targeted follow-up questions informed by your codebase exploration:
     \\  * Scope and boundaries (what's in/out)
+    \\  * How it should integrate with existing patterns you found
     \\  * Acceptance criteria (how will we know it's done)
     \\  * Constraints or preferences
-    \\  * Priority if multiple features
     \\- Keep asking until you have enough detail to plan
-    \\
-    \\PHASE 2: EXPLORE CODEBASE
-    \\Once requirements are clear:
-    \\- Read AGENTS.md for project conventions and build commands
-    \\- Explore relevant parts of the codebase
-    \\- Understand the current architecture
-    \\- Identify files that will need changes
-    \\- Share key findings with the user
     \\
     \\PHASE 3: PROPOSE PLAN
     \\Present a detailed, numbered implementation plan:
+    \\- Reference specific files and patterns discovered in Phase 1
     \\- Break work into small, self-contained tasks
     \\- Each task should be completable in one session
     \\- Include acceptance criteria for each task
@@ -249,12 +255,15 @@ const planning_prompt_template =
     \\- Format as a numbered list the user can review
     \\
     \\Example plan format:
-    \\  "Here's my proposed implementation plan:
+    \\  "Based on my exploration, I see you use [pattern] in src/cmds/.
+    \\   Here's my proposed implementation plan:
     \\
-    \\   1. Add user model - create src/models/user.zig with User struct and validation
-    \\   2. Add auth endpoint - POST /api/login that validates credentials, returns JWT
-    \\   3. Add middleware - JWT validation middleware for protected routes
-    \\   4. Add tests - unit tests for auth flow, integration tests for endpoints
+    \\   1. Add user model - create src/models/user.zig following the struct
+    \\      patterns I found in src/cmds/git.zig
+    \\   2. Add auth endpoint - POST /api/login, integrating with your existing
+    \\      error handling in src/cmds/git.zig
+    \\   3. Add middleware - JWT validation following your existing patterns
+    \\   4. Add tests - unit tests matching your test/ structure
     \\
     \\   Does this look good? Should I adjust anything before creating tasks?"
     \\
@@ -267,7 +276,8 @@ const planning_prompt_template =
     \\  {1s} tasks list
     \\
     \\=== RULES ===
-    \\- ALWAYS ask questions before proposing a plan
+    \\- ALWAYS explore the codebase BEFORE asking questions
+    \\- Ask informed questions that reference what you found
     \\- NEVER create tasks without explicit user approval
     \\- NEVER git push (only commit)
     \\- Keep the conversation focused and productive
