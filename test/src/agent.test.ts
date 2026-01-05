@@ -441,3 +441,206 @@ describe("zagi agent run error handling", () => {
     expect(result).not.toContain("error: invalid ZAGI_AGENT");
   });
 });
+
+// ============================================================================
+// Agent Run: ZAGI_AGENT_CMD Override
+// ============================================================================
+
+/**
+ * Creates a mock executor that logs all arguments to a file.
+ * This allows us to verify exactly what arguments were passed.
+ */
+function createArgLoggingExecutor(repoDir: string): { script: string; logFile: string } {
+  const scriptPath = resolve(repoDir, "mock-log-args.sh");
+  const logFile = resolve(repoDir, "args.log");
+
+  const script = `#!/bin/bash
+# Log each argument on a separate line
+for arg in "$@"; do
+  echo "$arg" >> "${logFile}"
+done
+echo "---END---" >> "${logFile}"
+exit 0
+`;
+  writeFileSync(scriptPath, script);
+  chmodSync(scriptPath, 0o755);
+
+  return { script: scriptPath, logFile };
+}
+
+/**
+ * Creates an executor with multiple arguments that logs them.
+ * Returns both the base command path and the args log file.
+ */
+function createMultiArgExecutor(repoDir: string): { script: string; logFile: string } {
+  const scriptPath = resolve(repoDir, "mock-multi-arg.sh");
+  const logFile = resolve(repoDir, "multi-args.log");
+
+  // Script logs: the script name ($0), all args ($@), and arg count ($#)
+  const script = `#!/bin/bash
+echo "ARG_COUNT: $#" >> "${logFile}"
+for arg in "$@"; do
+  echo "ARG: $arg" >> "${logFile}"
+done
+exit 0
+`;
+  writeFileSync(scriptPath, script);
+  chmodSync(scriptPath, 0o755);
+
+  return { script: scriptPath, logFile };
+}
+
+describe("zagi agent run ZAGI_AGENT_CMD override", () => {
+  test("uses custom command instead of default executor", () => {
+    const { script, logFile } = createArgLoggingExecutor(REPO_DIR);
+
+    zagi(["tasks", "add", "Test custom command"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: script }
+    });
+
+    expect(result).toContain("Task completed successfully");
+
+    // Verify the custom script was called (log file exists and has content)
+    const { readFileSync } = require("fs");
+    const logContent = readFileSync(logFile, "utf-8");
+    expect(logContent).toContain("---END---"); // Script was executed
+
+    // The prompt should be passed as the argument
+    expect(logContent).toContain("You are working on: task-001");
+  });
+
+  test("handles command with spaces and multiple arguments", () => {
+    const { script, logFile } = createMultiArgExecutor(REPO_DIR);
+
+    zagi(["tasks", "add", "Test multi-arg command"], { cwd: REPO_DIR });
+
+    // Command with multiple space-separated arguments
+    const result = zagi(["agent", "run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: `${script} --yes --model gpt-4` }
+    });
+
+    expect(result).toContain("Task completed successfully");
+
+    // Verify all arguments were passed correctly
+    const { readFileSync } = require("fs");
+    const logContent = readFileSync(logFile, "utf-8");
+
+    // Should have: --yes, --model, gpt-4, and the prompt = 4 args
+    expect(logContent).toContain("ARG_COUNT: 4");
+    expect(logContent).toContain("ARG: --yes");
+    expect(logContent).toContain("ARG: --model");
+    expect(logContent).toContain("ARG: gpt-4");
+    // The prompt is the last argument
+    expect(logContent).toMatch(/ARG:.*You are working on: task-001/);
+  });
+
+  test("prompt is appended as final argument", () => {
+    const { script, logFile } = createMultiArgExecutor(REPO_DIR);
+
+    zagi(["tasks", "add", "Test prompt positioning"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: `${script} --first --second` }
+    });
+
+    expect(result).toContain("Task completed successfully");
+
+    // Parse log to verify argument order
+    const { readFileSync } = require("fs");
+    const logContent = readFileSync(logFile, "utf-8");
+    const lines = logContent.split("\n").filter((l: string) => l.startsWith("ARG: "));
+
+    // Arguments should be: --first, --second, <prompt>
+    expect(lines.length).toBe(3);
+    expect(lines[0]).toBe("ARG: --first");
+    expect(lines[1]).toBe("ARG: --second");
+    expect(lines[2]).toContain("You are working on: task-001"); // Prompt is last
+  });
+
+  test("dry-run shows ZAGI_AGENT_CMD in output", () => {
+    zagi(["tasks", "add", "Test dry-run display"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--dry-run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "my-custom-agent --verbose --timeout 30" }
+    });
+
+    expect(result).toContain("dry-run mode");
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("my-custom-agent --verbose --timeout 30");
+  });
+
+  test("custom command overrides ZAGI_AGENT completely", () => {
+    const { script, logFile } = createArgLoggingExecutor(REPO_DIR);
+
+    zagi(["tasks", "add", "Test override"], { cwd: REPO_DIR });
+
+    // Set both ZAGI_AGENT and ZAGI_AGENT_CMD - CMD should win
+    const result = zagi(["agent", "run", "--once"], {
+      cwd: REPO_DIR,
+      env: {
+        ZAGI_AGENT: "opencode",
+        ZAGI_AGENT_CMD: script
+      }
+    });
+
+    expect(result).toContain("Task completed successfully");
+
+    // Verify our custom script was used (not opencode)
+    const { readFileSync } = require("fs");
+    const logContent = readFileSync(logFile, "utf-8");
+    expect(logContent).toContain("---END---"); // Our script ran
+    expect(logContent).toContain("You are working on:"); // Got the prompt
+  });
+});
+
+// ============================================================================
+// Agent Plan: ZAGI_AGENT_CMD Override
+// ============================================================================
+
+describe("zagi agent plan ZAGI_AGENT_CMD override", () => {
+  test("dry-run shows custom command", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Test planning"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "my-planner --interactive" }
+    });
+
+    expect(result).toContain("Planning Session (dry-run)");
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("my-planner --interactive");
+  });
+
+  test("dry-run shows custom command with multiple args", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Build feature X"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "aider --yes --model claude-3" }
+    });
+
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("aider --yes --model claude-3");
+  });
+
+  test("custom command is used instead of default", () => {
+    const { script, logFile } = createArgLoggingExecutor(REPO_DIR);
+
+    // This will actually execute the mock script
+    const result = zagi(["agent", "plan", "Test planning execution"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: script }
+    });
+
+    expect(result).toContain("Starting Planning Session");
+    expect(result).toContain("Planning session completed");
+
+    // Verify script received the planning prompt
+    const { readFileSync } = require("fs");
+    const logContent = readFileSync(logFile, "utf-8");
+    expect(logContent).toContain("You are a planning agent");
+    expect(logContent).toContain("Test planning execution"); // The description
+  });
+});
