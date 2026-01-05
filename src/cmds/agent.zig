@@ -630,7 +630,11 @@ fn getPendingTasks(allocator: std.mem.Allocator) !PendingTasks {
     return PendingTasks{ .tasks = pending.toOwnedSlice(allocator) catch &.{} };
 }
 
-fn createPrompt(allocator: std.mem.Allocator, exe_path: []const u8, task_id: []const u8, task_content: []const u8) ![]u8 {
+fn createPrompt(allocator: std.mem.Allocator, executor: []const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8) ![]u8 {
+    // Determine which documentation file this executor should update
+    const is_claude = std.mem.eql(u8, executor, "claude");
+    const docs_file = if (is_claude) "CLAUDE.md" else "AGENTS.md";
+
     return std.fmt.allocPrint(allocator,
         \\You are working on: {0s}
         \\
@@ -642,19 +646,26 @@ fn createPrompt(allocator: std.mem.Allocator, exe_path: []const u8, task_id: []c
         \\3. Verify your work (run tests, check build)
         \\4. Commit your changes with: git commit -m "<message>"
         \\5. Mark the task done: {2s} tasks done {0s}
-        \\6. If you learn critical operational details, update AGENTS.md
+        \\
+        \\Knowledge Persistence:
+        \\If you discover important structural insights during this task, update {3s}:
+        \\- Build commands that work (or gotchas that don't)
+        \\- Key file locations and their purposes
+        \\- Project conventions not documented elsewhere
+        \\- Common errors and their solutions
+        \\Only add genuinely useful operational knowledge, not task-specific details.
         \\
         \\Rules:
         \\- NEVER git push (only commit)
         \\- ONLY work on this one task
         \\- Exit when done so the next task can start
-    , .{ task_id, task_content, exe_path });
+    , .{ task_id, task_content, exe_path, docs_file });
 }
 
 fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]const u8, agent_cmd: ?[]const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8) !bool {
     const stderr = std.fs.File.stderr().deprecatedWriter();
 
-    const prompt = try createPrompt(allocator, exe_path, task_id, task_content);
+    const prompt = try createPrompt(allocator, executor, exe_path, task_id, task_content);
     defer allocator.free(prompt);
 
     var runner_args = try buildExecutorArgs(allocator, executor, model, agent_cmd, prompt);
