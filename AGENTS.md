@@ -68,12 +68,16 @@ zagi agent plan --model claude-sonnet-4-20250514
 ```
 
 The planning agent follows an interactive protocol:
-1. **Gather requirements**: Asks questions to understand what you want to build
-2. **Explore codebase**: Reads AGENTS.md and relevant code to understand architecture
+1. **Explore codebase**: Reads AGENTS.md and relevant code to understand architecture
+2. **Ask clarifying questions**: Asks about scope, constraints, and preferences before drafting any plan
 3. **Propose plan**: Presents a numbered implementation plan for your review
 4. **Create tasks**: Only creates tasks after you explicitly approve the plan
 
-This collaborative approach ensures the agent gathers all necessary context before committing to a task breakdown.
+This collaborative approach ensures the agent gathers all necessary context before committing to a task breakdown. The agent will ask 2-4 focused questions at a time about:
+- **Scope**: What's included/excluded, edge cases, MVP vs nice-to-haves
+- **Constraints**: Performance requirements, dependencies, compatibility
+- **Preferences**: Approach/patterns, integration with existing code, testing expectations
+- **Acceptance criteria**: How we know it's done, what success looks like
 
 ### zagi agent run
 

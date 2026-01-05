@@ -1074,11 +1074,35 @@ describe("zagi agent plan interactive mode", () => {
     });
 
     // Verify the prompt includes the 4-phase protocol
-    expect(result).toContain("PHASE 1: GATHER REQUIREMENTS");
-    expect(result).toContain("PHASE 2: EXPLORE CODEBASE");
+    expect(result).toContain("PHASE 1: EXPLORE CODEBASE");
+    expect(result).toContain("PHASE 2: ASK CLARIFYING QUESTIONS");
     expect(result).toContain("PHASE 3: PROPOSE PLAN");
     expect(result).toContain("PHASE 4: CREATE TASKS");
     expect(result).toContain("NEVER create tasks without explicit user approval");
+  });
+
+  test("prompt includes clarifying question categories", () => {
+    const result = zagi(["agent", "plan", "--dry-run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "my-agent" }
+    });
+
+    // Verify the prompt includes question categories for scope, constraints, preferences
+    expect(result).toContain("SCOPE questions:");
+    expect(result).toContain("CONSTRAINTS questions:");
+    expect(result).toContain("PREFERENCES questions:");
+    expect(result).toContain("ACCEPTANCE CRITERIA questions:");
+  });
+
+  test("prompt emphasizes asking questions before drafting plan", () => {
+    const result = zagi(["agent", "plan", "--dry-run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "my-agent" }
+    });
+
+    // Verify the prompt emphasizes asking questions first
+    expect(result).toContain("DO NOT draft a plan yet");
+    expect(result).toContain("ALWAYS ask clarifying questions BEFORE drafting a plan");
   });
 });
 

@@ -200,10 +200,10 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 /// Planning prompt template for the `zagi agent plan` subcommand.
 ///
 /// This prompt instructs an AI agent to conduct an INTERACTIVE planning session
-/// where it explores the codebase first, then gathers requirements from the user
-/// through informed questions before creating any tasks. The session is collaborative
-/// - the agent understands the architecture, asks targeted questions, and only
-/// creates tasks after user approval.
+/// where it explores the codebase first, then asks clarifying questions about
+/// scope, constraints, and preferences before drafting any plan. The session is
+/// collaborative - the agent understands the architecture, asks targeted questions
+/// to gather requirements, and only creates tasks after user approval.
 ///
 /// Template placeholders:
 /// - {0s}: Optional initial context from the user (may be empty)
@@ -211,7 +211,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 ///
 /// The planning agent follows a strict protocol:
 /// 1. EXPLORE: Read the codebase to understand architecture FIRST
-/// 2. GATHER: Ask informed questions based on codebase exploration
+/// 2. ASK: Ask clarifying questions about scope, constraints, preferences
 /// 3. PROPOSE: Present a numbered plan referencing specific files/patterns
 /// 4. CONFIRM: Only create tasks after explicit approval
 const planning_prompt_template =
@@ -233,19 +233,37 @@ const planning_prompt_template =
     \\
     \\This exploration helps you ask informed questions and propose realistic plans.
     \\
-    \\PHASE 2: GATHER REQUIREMENTS (with codebase context)
-    \\Now engage the user with informed questions:
-    \\- If initial context was provided, acknowledge it and share relevant findings
-    \\  from your exploration (e.g., "I see you already have X in src/foo.zig...")
-    \\- If no context, ask "What would you like to build or accomplish?"
-    \\- Ask targeted follow-up questions informed by your codebase exploration:
-    \\  * Scope and boundaries (what's in/out)
-    \\  * How it should integrate with existing patterns you found
-    \\  * Acceptance criteria (how will we know it's done)
-    \\  * Constraints or preferences
-    \\- Keep asking until you have enough detail to plan
+    \\PHASE 2: ASK CLARIFYING QUESTIONS (critical - do not skip)
+    \\DO NOT draft a plan yet. First, engage the user with clarifying questions.
+    \\Ask about these areas before proposing any implementation:
     \\
-    \\PHASE 3: PROPOSE PLAN
+    \\SCOPE questions:
+    \\- What specific functionality should be included/excluded?
+    \\- Are there edge cases or error scenarios to consider?
+    \\- What's the minimum viable version vs nice-to-haves?
+    \\
+    \\CONSTRAINTS questions:
+    \\- Are there performance requirements?
+    \\- Any dependencies or compatibility concerns?
+    \\- Time/effort budget considerations?
+    \\
+    \\PREFERENCES questions:
+    \\- Preferred approach or patterns? (e.g., "should this use X or Y?")
+    \\- How should this integrate with existing code?
+    \\- Testing requirements or coverage expectations?
+    \\
+    \\ACCEPTANCE CRITERIA questions:
+    \\- How will we know when this is done?
+    \\- What does success look like?
+    \\
+    \\Guidelines:
+    \\- Ask 2-4 focused questions at a time, not a wall of questions
+    \\- Reference what you found in the codebase to make questions specific
+    \\- Keep asking until you have clarity on scope, constraints, and preferences
+    \\- If context was provided, acknowledge it and ask clarifying follow-ups
+    \\- If no context, start by asking "What would you like to build?"
+    \\
+    \\PHASE 3: PROPOSE PLAN (only after clarifying questions answered)
     \\Present a detailed, numbered implementation plan:
     \\- Reference specific files and patterns discovered in Phase 1
     \\- Break work into small, self-contained tasks
@@ -255,8 +273,7 @@ const planning_prompt_template =
     \\- Format as a numbered list the user can review
     \\
     \\Example plan format:
-    \\  "Based on my exploration, I see you use [pattern] in src/cmds/.
-    \\   Here's my proposed implementation plan:
+    \\  "Based on our discussion and my exploration, here's my proposed plan:
     \\
     \\   1. Add user model - create src/models/user.zig following the struct
     \\      patterns I found in src/cmds/git.zig
@@ -277,6 +294,7 @@ const planning_prompt_template =
     \\
     \\=== RULES ===
     \\- ALWAYS explore the codebase BEFORE asking questions
+    \\- ALWAYS ask clarifying questions BEFORE drafting a plan
     \\- Ask informed questions that reference what you found
     \\- NEVER create tasks without explicit user approval
     \\- NEVER git push (only commit)
