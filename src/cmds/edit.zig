@@ -622,6 +622,89 @@ pub fn completeEdit(repo: ?*c.git_repository, allocator: std.mem.Allocator) Erro
     stdout.print("rebased: {d} commits\n", .{rebased_count}) catch return Error.AllocationError;
 }
 
+/// Check if there's a conflict in progress (refs/edit/current exists)
+fn isConflictActive(repo: ?*c.git_repository) bool {
+    var ref: ?*c.git_reference = null;
+    const result = c.git_reference_lookup(&ref, repo, REF_EDIT_CURRENT);
+    if (result == 0) {
+        c.git_reference_free(ref);
+        return true;
+    }
+    return false;
+}
+
+/// Get the current commit being cherry-picked (during conflict)
+fn getCurrentConflict(repo: ?*c.git_repository) ?c.git_oid {
+    var ref: ?*c.git_reference = null;
+    const result = c.git_reference_lookup(&ref, repo, REF_EDIT_CURRENT);
+    if (result < 0) {
+        return null;
+    }
+    defer c.git_reference_free(ref);
+
+    const target_oid = c.git_reference_target(ref);
+    if (target_oid == null) {
+        return null;
+    }
+    return target_oid.*;
+}
+
+/// Show the current edit status.
+/// Output format:
+///   If not active: 'edit: not active' (exit 0)
+///   If active: 'edit: active', 'target: <hash>', 'origin: <hash>', 'remaining: N commits'
+///   If conflict: also 'status: conflict at <commit>'
+pub fn showStatus(repo: ?*c.git_repository, allocator: std.mem.Allocator) Error!void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+
+    // Check if edit is active
+    if (!isEditActive(repo)) {
+        stdout.print("edit: not active\n", .{}) catch return Error.AllocationError;
+        return;
+    }
+
+    // Edit is active
+    stdout.print("edit: active\n", .{}) catch return Error.AllocationError;
+
+    // Get and print current HEAD (target)
+    var head_ref: ?*c.git_reference = null;
+    if (c.git_repository_head(&head_ref, repo) == 0) {
+        defer c.git_reference_free(head_ref);
+        const head_oid = c.git_reference_target(head_ref);
+        if (head_oid != null) {
+            var short_hash: [8]u8 = undefined;
+            _ = c.git_oid_tostr(&short_hash, short_hash.len, head_oid);
+            stdout.print("target: {s}\n", .{short_hash[0..7]}) catch return Error.AllocationError;
+        }
+    }
+
+    // Get and print origin
+    if (getOrigin(repo)) |origin_oid| {
+        var short_hash: [8]u8 = undefined;
+        _ = c.git_oid_tostr(&short_hash, short_hash.len, &origin_oid);
+        stdout.print("origin: {s}\n", .{short_hash[0..7]}) catch return Error.AllocationError;
+    }
+
+    // Get and print remaining commits count
+    const descendants = getDescendants(repo, allocator) catch {
+        stdout.print("remaining: ? commits\n", .{}) catch return Error.AllocationError;
+        return;
+    };
+    defer allocator.free(descendants);
+    stdout.print("remaining: {d} commits\n", .{descendants.len}) catch return Error.AllocationError;
+
+    // Check for conflict state
+    if (isConflictActive(repo)) {
+        if (getCurrentConflict(repo)) |current_oid| {
+            var short_hash: [8]u8 = undefined;
+            _ = c.git_oid_tostr(&short_hash, short_hash.len, &current_oid);
+            stdout.print("status: conflict at {s}\n", .{short_hash[0..7]}) catch return Error.AllocationError;
+        } else {
+            stdout.print("status: conflict\n", .{}) catch return Error.AllocationError;
+        }
+    }
+}
+
 /// Abort an edit session - restore original state before the edit started.
 /// This should always succeed and fully restore the original state.
 pub fn abortEdit(repo: ?*c.git_repository) Error!void {
@@ -760,8 +843,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     } else if (do_abort) {
         try abortEdit(repo);
     } else if (do_status) {
-        // TODO: Implement showStatus()
-        return git.Error.UsageError;
+        try showStatus(repo, allocator);
     } else if (target) |t| {
         try startEdit(repo, t, allocator);
     } else {
