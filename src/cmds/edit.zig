@@ -622,6 +622,97 @@ pub fn completeEdit(repo: ?*c.git_repository, allocator: std.mem.Allocator) Erro
     stdout.print("rebased: {d} commits\n", .{rebased_count}) catch return Error.AllocationError;
 }
 
+/// Abort an edit session - restore original state before the edit started.
+/// This should always succeed and fully restore the original state.
+pub fn abortEdit(repo: ?*c.git_repository) Error!void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+
+    // Check that edit is active
+    if (!isEditActive(repo)) {
+        return Error.EditNotActive;
+    }
+
+    // Load origin OID from refs/edit/origin
+    const origin_oid = getOrigin(repo) orelse return Error.RefReadFailed;
+
+    // Look up the origin commit
+    var origin_commit: ?*c.git_commit = null;
+    if (c.git_commit_lookup(&origin_commit, repo, &origin_oid) < 0) {
+        return Error.InvalidCommit;
+    }
+    defer c.git_commit_free(origin_commit);
+
+    // Get origin commit's tree
+    var origin_tree: ?*c.git_tree = null;
+    if (c.git_commit_tree(&origin_tree, origin_commit) < 0) {
+        return Error.InvalidCommit;
+    }
+    defer c.git_tree_free(origin_tree);
+
+    // Checkout origin's tree (force to discard any changes from edit session)
+    var checkout_opts: c.git_checkout_options = undefined;
+    _ = c.git_checkout_options_init(&checkout_opts, c.GIT_CHECKOUT_OPTIONS_VERSION);
+    checkout_opts.checkout_strategy = c.GIT_CHECKOUT_FORCE;
+
+    if (c.git_checkout_tree(repo, @ptrCast(origin_tree), &checkout_opts) < 0) {
+        return Error.InvalidCommit;
+    }
+
+    // Find the branch that was at origin_oid and restore HEAD to it
+    var branch_name: ?[]const u8 = null;
+    var branch_name_buf: [256]u8 = undefined;
+
+    // Iterate through branches to find the one matching origin_oid
+    var branch_iter: ?*c.git_branch_iterator = null;
+    if (c.git_branch_iterator_new(&branch_iter, repo, c.GIT_BRANCH_LOCAL) == 0) {
+        defer c.git_branch_iterator_free(branch_iter);
+
+        var ref: ?*c.git_reference = null;
+        var branch_type: c.git_branch_t = undefined;
+        while (c.git_branch_next(&ref, &branch_type, branch_iter) == 0) {
+            defer c.git_reference_free(ref);
+            const target = c.git_reference_target(ref);
+            if (target != null and c.git_oid_equal(target, &origin_oid) != 0) {
+                const name_ptr = c.git_reference_shorthand(ref);
+                if (name_ptr != null) {
+                    const name = std.mem.sliceTo(name_ptr, 0);
+                    @memcpy(branch_name_buf[0..name.len], name);
+                    branch_name = branch_name_buf[0..name.len];
+                    break;
+                }
+            }
+        }
+    }
+
+    // Restore HEAD - either to branch or detached at origin
+    if (branch_name) |name| {
+        var symbolic_name_buf: [512]u8 = undefined;
+        const symbolic_ref = std.fmt.bufPrint(&symbolic_name_buf, "refs/heads/{s}", .{name}) catch return Error.AllocationError;
+        var symbolic_z: [512]u8 = undefined;
+        @memcpy(symbolic_z[0..symbolic_ref.len], symbolic_ref);
+        symbolic_z[symbolic_ref.len] = 0;
+
+        if (c.git_repository_set_head(repo, &symbolic_z) < 0) {
+            return Error.RefWriteFailed;
+        }
+    } else {
+        // No matching branch found - set HEAD detached at origin
+        if (c.git_repository_set_head_detached(repo, &origin_oid) < 0) {
+            return Error.RefWriteFailed;
+        }
+    }
+
+    // Clear all edit state refs
+    try clearState(repo);
+
+    // Output: 'edit: aborted' then 'restored: <short-hash>'
+    var short_hash: [8]u8 = undefined;
+    _ = c.git_oid_tostr(&short_hash, short_hash.len, &origin_oid);
+
+    stdout.print("edit: aborted\n", .{}) catch return Error.AllocationError;
+    stdout.print("restored: {s}\n", .{short_hash[0..7]}) catch return Error.AllocationError;
+}
+
 /// Main entry point for the edit command
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -667,8 +758,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     if (do_back) {
         try completeEdit(repo, allocator);
     } else if (do_abort) {
-        // TODO: Implement abortEdit()
-        return git.Error.UsageError;
+        try abortEdit(repo);
     } else if (do_status) {
         // TODO: Implement showStatus()
         return git.Error.UsageError;
