@@ -286,7 +286,14 @@ const planning_prompt_template =
     \\
     \\PHASE 4: CREATE TASKS (only after approval)
     \\Wait for explicit user confirmation before creating any tasks.
-    \\When approved, create tasks using:
+    \\When approved, you have two options:
+    \\
+    \\Option A - Write plan to file, then import:
+    \\  1. Write plan to plan.md with numbered list (1. Task one, 2. Task two, ...)
+    \\  2. Run: {1s} tasks import plan.md
+    \\  This creates all tasks at once from the markdown file.
+    \\
+    \\Option B - Add tasks individually:
     \\  {1s} tasks add "<task description with acceptance criteria>"
     \\
     \\After creating all tasks, show the final list:

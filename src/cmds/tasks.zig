@@ -31,60 +31,6 @@ fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return result.toOwnedSlice(allocator);
 }
 
-/// Escape content for storage (newlines -> \n, pipes -> \p, backslashes -> \\)
-/// This allows content with embedded newlines and pipes to be stored in the line-based format.
-fn escapeContentForStorage(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result = std.ArrayList(u8){};
-    errdefer result.deinit(allocator);
-
-    for (input) |char| {
-        switch (char) {
-            '\\' => try result.appendSlice(allocator, "\\\\"),
-            '\n' => try result.appendSlice(allocator, "\\n"),
-            '|' => try result.appendSlice(allocator, "\\p"),
-            else => try result.append(allocator, char),
-        }
-    }
-
-    return result.toOwnedSlice(allocator);
-}
-
-/// Unescape content from storage (\\n -> newline, \\p -> pipe, \\\\ -> backslash)
-fn unescapeContentFromStorage(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result = std.ArrayList(u8){};
-    errdefer result.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < input.len) {
-        if (i + 1 < input.len and input[i] == '\\') {
-            switch (input[i + 1]) {
-                '\\' => {
-                    try result.append(allocator, '\\');
-                    i += 2;
-                },
-                'n' => {
-                    try result.append(allocator, '\n');
-                    i += 2;
-                },
-                'p' => {
-                    try result.append(allocator, '|');
-                    i += 2;
-                },
-                else => {
-                    // Unknown escape, keep as-is
-                    try result.append(allocator, input[i]);
-                    i += 1;
-                },
-            }
-        } else {
-            try result.append(allocator, input[i]);
-            i += 1;
-        }
-    }
-
-    return result.toOwnedSlice(allocator);
-}
-
 pub const help =
     \\usage: git tasks <command> [options]
     \\
@@ -94,27 +40,21 @@ pub const help =
     \\  add <content>           Add a new task
     \\  list                    List all tasks
     \\  show <id>               Show task details
-    \\  edit <id> <content>     Edit task content (use --append to add notes)
-    \\  delete <id>             Delete a task (blocked in agent mode)
+    \\  edit <id> <content>     Edit task content
+    \\  delete <id>             Delete a task
     \\  done <id>               Mark task as complete
     \\  pr                      Export tasks as markdown for PR description
     \\  import <file>           Import tasks from a plan file (markdown)
     \\
     \\Options:
     \\  --json                 Output in JSON format
-    \\  --append               Append content instead of replacing (edit only)
     \\  -h, --help             Show this help message
-    \\
-    \\Agent mode (ZAGI_AGENT):
-    \\  When ZAGI_AGENT is set, 'edit' automatically appends instead of replacing.
-    \\  This prevents agents from accidentally overwriting task content.
     \\
     \\Examples:
     \\  git tasks add "Fix authentication bug"
     \\  git tasks list
     \\  git tasks show task-001
     \\  git tasks edit task-001 "Fix authentication and authorization bug"
-    \\  git tasks edit task-001 "Found root cause: Y" --append
     \\  git tasks delete task-001
     \\  git tasks done task-001
     \\  git tasks pr
@@ -200,19 +140,17 @@ const TaskList = struct {
         lines.append(allocator, next_id_line) catch return Error.OutOfMemory;
 
         // Task lines: id|content|status|created|completed
-        // Content is escaped to handle embedded newlines and pipes
         for (self.tasks.items) |task| {
             const completed_str = if (task.completed) |comp_time| std.fmt.allocPrint(allocator, "{}", .{comp_time}) catch return Error.OutOfMemory else allocator.dupe(u8, "") catch return Error.OutOfMemory;
-            defer if (task.completed != null) allocator.free(completed_str);
-
-            // Escape content for storage
-            const escaped_content = escapeContentForStorage(allocator, task.content) catch return Error.OutOfMemory;
-            defer allocator.free(escaped_content);
 
             const task_line = std.fmt.allocPrint(allocator, "task:{s}|{s}|{s}|{}|{s}",
-                .{ task.id, escaped_content, task.status, task.created, completed_str }
+                .{ task.id, task.content, task.status, task.created, completed_str }
             ) catch return Error.OutOfMemory;
             lines.append(allocator, task_line) catch return Error.OutOfMemory;
+
+            if (task.completed != null) {
+                allocator.free(completed_str);
+            }
         }
 
         // Join lines with newlines
@@ -260,11 +198,10 @@ const TaskList = struct {
                 const id = parts.next() orelse continue; // Skip malformed lines without ID
                 if (id.len == 0) continue; // Skip tasks with empty IDs
 
-                const escaped_content = parts.next() orelse continue; // Skip malformed lines without content
+                const content = parts.next() orelse continue; // Skip malformed lines without content
 
                 task.id = allocator.dupe(u8, id) catch return Error.AllocationError;
-                // Unescape content from storage (handles embedded newlines and pipes)
-                task.content = unescapeContentFromStorage(allocator, escaped_content) catch {
+                task.content = allocator.dupe(u8, content) catch {
                     allocator.free(task.id);
                     return Error.AllocationError;
                 };
@@ -1022,31 +959,29 @@ fn runPr(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository)
 fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
 
-    // Check if we're in agent mode - agents can only append, not replace
+    // Check if we should block this operation in agent mode
     const guardrails = @import("../guardrails.zig");
-    const is_agent_mode = guardrails.isAgentMode();
+    if (guardrails.isAgentMode()) {
+        stdout.print("error: edit command blocked (ZAGI_AGENT is set)\n", .{}) catch {};
+        stdout.print("reason: modifying tasks could cause data loss\n", .{}) catch {};
+        return Error.InvalidCommand;
+    }
 
     // Need at least: tasks edit <id> <content>
     if (args.len < 5) {
-        stdout.print("error: missing task ID or content\n\nusage: git tasks edit <id> <content> [--append]\n", .{}) catch {};
+        stdout.print("error: missing task ID or content\n\nusage: git tasks edit <id> <content>\n", .{}) catch {};
         return Error.InvalidTaskId;
     }
 
     const task_id = std.mem.sliceTo(args[3], 0);
 
-    // Parse content arguments and flags
+    // Parse content arguments (everything from args[4] onwards)
     var content_parts = std.ArrayList([]const u8){};
     defer content_parts.deinit(allocator);
-    var use_json = false;
-    var append_flag = false;
 
     for (args[4..]) |arg| {
         const arg_str = std.mem.sliceTo(arg, 0);
-        if (std.mem.eql(u8, arg_str, "--json")) {
-            use_json = true;
-        } else if (std.mem.eql(u8, arg_str, "--append")) {
-            append_flag = true;
-        } else {
+        if (!std.mem.eql(u8, arg_str, "--json")) { // Skip --json flag for content
             content_parts.append(allocator, arg_str) catch return Error.AllocationError;
         }
     }
@@ -1070,8 +1005,15 @@ fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
     const new_content = content_buffer.toOwnedSlice(allocator) catch return Error.AllocationError;
     defer allocator.free(new_content);
 
-    // Determine if we should append: explicit --append flag OR agent mode (auto-append)
-    const should_append = append_flag or is_agent_mode;
+    // Check for --json flag
+    var use_json = false;
+    for (args[3..]) |arg| {
+        const a = std.mem.sliceTo(arg, 0);
+        if (std.mem.eql(u8, a, "--json")) {
+            use_json = true;
+            break;
+        }
+    }
 
     // Load task list
     var task_list = loadTaskList(repo, allocator) catch |err| {
@@ -1096,17 +1038,9 @@ fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 
     const task = found_task.?;
 
-    // Update task content - either append or replace
-    if (should_append) {
-        // Append mode: preserve original content, add separator and new content
-        const appended_content = appendToTask(allocator, task.content, new_content) catch return Error.AllocationError;
-        allocator.free(task.content); // Free old content
-        task.content = appended_content;
-    } else {
-        // Replace mode: overwrite content entirely
-        allocator.free(task.content); // Free old content
-        task.content = allocator.dupe(u8, new_content) catch return Error.AllocationError;
-    }
+    // Update task content
+    allocator.free(task.content); // Free old content
+    task.content = allocator.dupe(u8, new_content) catch return Error.AllocationError;
 
     // Save updated task list
     saveTaskList(repo, task_list, allocator) catch |err| {
@@ -1116,47 +1050,20 @@ fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 
     // Output confirmation
     if (use_json) {
-        // JSON output - need to escape content which may now contain newlines
+        // JSON output
         const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
         defer allocator.free(completed_str);
 
-        const escaped_content = escapeJsonString(allocator, task.content) catch return Error.AllocationError;
-        defer allocator.free(escaped_content);
-
         const json_output = try std.fmt.allocPrint(allocator,
             "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
-            .{ task.id, escaped_content, task.status, task.created, completed_str }
+            .{ task.id, task.content, task.status, task.created, completed_str }
         );
         defer allocator.free(json_output);
 
         stdout.print("{s}\n", .{json_output}) catch {};
     } else {
-        if (should_append) {
-            stdout.print("appended: {s}\n  {s}\n", .{ task_id, new_content }) catch {};
-        } else {
-            stdout.print("updated: {s}\n  {s}\n", .{ task_id, new_content }) catch {};
-        }
+        stdout.print("updated: {s}\n  {s}\n", .{ task_id, new_content }) catch {};
     }
-}
-
-/// Append new content to existing task content with a separator.
-/// Format: "original content\n---\nnew content"
-fn appendToTask(allocator: std.mem.Allocator, original: []const u8, addition: []const u8) Error![]u8 {
-    const separator = "\n---\n";
-    const total_len = original.len + separator.len + addition.len;
-
-    var result = allocator.alloc(u8, total_len) catch return Error.AllocationError;
-    var pos: usize = 0;
-
-    @memcpy(result[pos..][0..original.len], original);
-    pos += original.len;
-
-    @memcpy(result[pos..][0..separator.len], separator);
-    pos += separator.len;
-
-    @memcpy(result[pos..][0..addition.len], addition);
-
-    return result;
 }
 
 fn runDelete(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
@@ -1728,147 +1635,4 @@ test "parseTasksFromMarkdown - handles indentation" {
     try testing.expectEqual(@as(usize, 2), tasks.items.len);
     try testing.expectEqualStrings("Indented task", tasks.items[0]);
     try testing.expectEqualStrings("Bullet with indent", tasks.items[1]);
-}
-
-test "appendToTask - basic append" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const result = try appendToTask(allocator, "Fix bug in X", "Found root cause: Y");
-    defer allocator.free(result);
-
-    try testing.expectEqualStrings("Fix bug in X\n---\nFound root cause: Y", result);
-}
-
-test "appendToTask - multiple appends" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // First append
-    const first = try appendToTask(allocator, "Original task", "First note");
-    defer allocator.free(first);
-
-    // Second append (simulating multiple agent edits)
-    const second = try appendToTask(allocator, first, "Second note");
-    defer allocator.free(second);
-
-    try testing.expectEqualStrings("Original task\n---\nFirst note\n---\nSecond note", second);
-}
-
-test "appendToTask - empty original" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const result = try appendToTask(allocator, "", "New content");
-    defer allocator.free(result);
-
-    try testing.expectEqualStrings("\n---\nNew content", result);
-}
-
-test "appendToTask - empty addition" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const result = try appendToTask(allocator, "Original", "");
-    defer allocator.free(result);
-
-    try testing.expectEqualStrings("Original\n---\n", result);
-}
-
-test "appendToTask - content with newlines" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Test appending content that contains newlines
-    const result = try appendToTask(allocator, "Original task", "Line 1\nLine 2\nLine 3");
-    defer allocator.free(result);
-
-    // The append function preserves newlines - escaping happens at storage layer
-    try testing.expectEqualStrings("Original task\n---\nLine 1\nLine 2\nLine 3", result);
-}
-
-test "appendToTask - both original and addition have newlines" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Test when both original content and addition have newlines
-    const result = try appendToTask(allocator, "Task line 1\nTask line 2", "Note line 1\nNote line 2");
-    defer allocator.free(result);
-
-    try testing.expectEqualStrings("Task line 1\nTask line 2\n---\nNote line 1\nNote line 2", result);
-}
-
-test "escapeContentForStorage - handles newlines" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const result = try escapeContentForStorage(allocator, "line1\nline2");
-    defer allocator.free(result);
-
-    try testing.expectEqualStrings("line1\\nline2", result);
-}
-
-test "escapeContentForStorage - handles pipes" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const result = try escapeContentForStorage(allocator, "field1|field2");
-    defer allocator.free(result);
-
-    try testing.expectEqualStrings("field1\\pfield2", result);
-}
-
-test "escapeContentForStorage - handles backslashes" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const result = try escapeContentForStorage(allocator, "path\\to\\file");
-    defer allocator.free(result);
-
-    try testing.expectEqualStrings("path\\\\to\\\\file", result);
-}
-
-test "unescapeContentFromStorage - handles newlines" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const result = try unescapeContentFromStorage(allocator, "line1\\nline2");
-    defer allocator.free(result);
-
-    try testing.expectEqualStrings("line1\nline2", result);
-}
-
-test "unescapeContentFromStorage - handles pipes" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const result = try unescapeContentFromStorage(allocator, "field1\\pfield2");
-    defer allocator.free(result);
-
-    try testing.expectEqualStrings("field1|field2", result);
-}
-
-test "escape/unescape roundtrip" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const original = "Task content\n---\nNote with newline\nand pipe|char\\and backslash";
-    const escaped = try escapeContentForStorage(allocator, original);
-    defer allocator.free(escaped);
-    const unescaped = try unescapeContentFromStorage(allocator, escaped);
-    defer allocator.free(unescaped);
-
-    try testing.expectEqualStrings(original, unescaped);
 }
