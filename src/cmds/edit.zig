@@ -183,3 +183,39 @@ pub fn clearState(repo: ?*c.git_repository) Error!void {
         c.git_reference_free(descendants_ref);
     }
 }
+
+/// Collect all commits between target (exclusive) and HEAD (inclusive).
+/// Returns OIDs in oldest-first order (ready for rebasing).
+/// These are the commits that will need to be rebased after editing the target.
+pub fn collectDescendants(repo: ?*c.git_repository, target: c.git_oid, head: c.git_oid, allocator: std.mem.Allocator) Error![]c.git_oid {
+    // Create revwalk
+    var walk: ?*c.git_revwalk = null;
+    if (c.git_revwalk_new(&walk, repo) < 0) {
+        return Error.NotAnAncestor;
+    }
+    defer c.git_revwalk_free(walk);
+
+    // Sort topologically and reverse to get oldest-first order
+    _ = c.git_revwalk_sorting(walk, c.GIT_SORT_TOPOLOGICAL | c.GIT_SORT_REVERSE);
+
+    // Start from HEAD
+    if (c.git_revwalk_push(walk, &head) < 0) {
+        return Error.NotAnAncestor;
+    }
+
+    // Hide the target commit and its ancestors - we only want descendants
+    if (c.git_revwalk_hide(walk, &target) < 0) {
+        return Error.NotAnAncestor;
+    }
+
+    // Collect all commits in the walk
+    var oids = std.ArrayList(c.git_oid).init(allocator);
+    errdefer oids.deinit();
+
+    var oid: c.git_oid = undefined;
+    while (c.git_revwalk_next(&oid, walk) == 0) {
+        oids.append(oid) catch return Error.AllocationError;
+    }
+
+    return oids.toOwnedSlice() catch return Error.AllocationError;
+}
