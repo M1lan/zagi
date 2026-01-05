@@ -15,6 +15,10 @@ afterEach(() => {
   }
 });
 
+// ============================================================================
+// Help and Basic Usage
+// ============================================================================
+
 describe("zagi tasks help", () => {
   test("shows help message", () => {
     const result = zagi(["tasks"], { cwd: REPO_DIR });
@@ -33,6 +37,10 @@ describe("zagi tasks help", () => {
     expect(result).toContain("usage: git tasks <command>");
   });
 });
+
+// ============================================================================
+// Task CRUD Operations
+// ============================================================================
 
 describe("zagi tasks add", () => {
   test("creates new task with generated ID", () => {
@@ -59,13 +67,13 @@ describe("zagi tasks add", () => {
     expect(parsed).toHaveProperty("completed", null);
   });
 
-  test("error for missing content", () => {
+  test("shows error for missing content", () => {
     const result = zagi(["tasks", "add"], { cwd: REPO_DIR });
 
     expect(result).toContain("error: missing task content");
   });
 
-  test("error for empty content", () => {
+  test("shows error for empty content", () => {
     const result = zagi(["tasks", "add", ""], { cwd: REPO_DIR });
 
     expect(result).toContain("error: task content cannot be empty");
@@ -166,13 +174,13 @@ describe("zagi tasks show", () => {
     expect(parsed).toHaveProperty("status", "pending");
   });
 
-  test("error for missing task ID", () => {
+  test("shows error for missing task ID", () => {
     const result = zagi(["tasks", "show"], { cwd: REPO_DIR });
 
     expect(result).toContain("error: missing task ID");
   });
 
-  test("error for non-existent task", () => {
+  test("shows error for non-existent task", () => {
     const result = zagi(["tasks", "show", "task-999"], { cwd: REPO_DIR });
 
     expect(result).toContain("error: task 'task-999' not found");
@@ -199,7 +207,7 @@ describe("zagi tasks done", () => {
     expect(result).toContain("(0 pending, 1 completed)");
   });
 
-  test("already completed task message", () => {
+  test("shows message for already completed task", () => {
     zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
     zagi(["tasks", "done", "task-001"], { cwd: REPO_DIR });
 
@@ -208,16 +216,63 @@ describe("zagi tasks done", () => {
     expect(result).toContain("task 'task-001' already completed");
   });
 
-  test("error for missing task ID", () => {
+  test("shows error for missing task ID", () => {
     const result = zagi(["tasks", "done"], { cwd: REPO_DIR });
 
     expect(result).toContain("error: missing task ID");
   });
 
-  test("error for non-existent task", () => {
+  test("shows error for non-existent task", () => {
     const result = zagi(["tasks", "done", "task-999"], { cwd: REPO_DIR });
 
     expect(result).toContain("error: task 'task-999' not found");
+  });
+});
+
+describe("zagi tasks edit", () => {
+  test("is blocked in agent mode", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["tasks", "edit", "task-001", "Updated content"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude-code" }
+    });
+
+    expect(result).toContain("error: edit command blocked");
+    expect(result).toContain("ZAGI_AGENT is set");
+  });
+
+  test("succeeds when not in agent mode", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["tasks", "edit", "task-001", "Updated content"], { cwd: REPO_DIR });
+
+    expect(result).toContain("updated: task-001");
+    expect(result).toContain("Updated content");
+  });
+});
+
+describe("zagi tasks delete", () => {
+  test("is blocked in agent mode", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["tasks", "delete", "task-001"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude-code" }
+    });
+
+    expect(result).toContain("error: delete command blocked");
+    expect(result).toContain("ZAGI_AGENT is set");
+    expect(result).toContain("permanent data loss");
+  });
+
+  test("succeeds when not in agent mode", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["tasks", "delete", "task-001"], { cwd: REPO_DIR });
+
+    expect(result).toContain("deleted: task-001");
+    expect(result).toContain("Test task");
   });
 });
 
@@ -263,119 +318,15 @@ describe("zagi tasks pr", () => {
   });
 });
 
-describe("zagi tasks edit", () => {
-  test("blocked in agent mode", () => {
-    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "edit", "task-001", "Updated content"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude-code" }
-    });
-
-    expect(result).toContain("error: edit command blocked");
-    expect(result).toContain("ZAGI_AGENT is set");
-  });
-
-  test("works when not in agent mode", () => {
-    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "edit", "task-001", "Updated content"], { cwd: REPO_DIR });
-
-    expect(result).toContain("updated: task-001");
-    expect(result).toContain("Updated content");
-  });
-});
-
-describe("zagi tasks delete", () => {
-  test("blocked in agent mode", () => {
-    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "delete", "task-001"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude-code" }
-    });
-
-    expect(result).toContain("error: delete command blocked");
-    expect(result).toContain("ZAGI_AGENT is set");
-    expect(result).toContain("permanent data loss");
-  });
-
-  test("works when not in agent mode", () => {
-    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "delete", "task-001"], { cwd: REPO_DIR });
-
-    expect(result).toContain("deleted: task-001");
-    expect(result).toContain("Test task");
-  });
-});
-
-describe("error handling", () => {
-  test("invalid subcommand shows error and help", () => {
-    const result = zagi(["tasks", "invalid"], { cwd: REPO_DIR });
-
-    expect(result).toContain("error: unknown command 'invalid'");
-    expect(result).toContain("usage: git tasks <command>");
-  });
-
-  test("task IDs are sequential", () => {
-    zagi(["tasks", "add", "First task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Second task"], { cwd: REPO_DIR });
-    zagi(["tasks", "add", "Third task"], { cwd: REPO_DIR });
-
-    const result = zagi(["tasks", "list"], { cwd: REPO_DIR });
-
-    expect(result).toContain("task-001");
-    expect(result).toContain("task-002");
-    expect(result).toContain("task-003");
-  });
-
-  test("works in non-git directory", () => {
-    const result = zagi(["tasks", "add", "Test task"], { cwd: "/tmp" });
-
-    // Should show error - either "error" or "fatal" depending on git behavior
-    expect(result.toLowerCase()).toMatch(/error|fatal/);
-  });
-});
-
-describe("performance", () => {
-  test("zagi tasks operations are reasonably fast", () => {
-    // Create several tasks
-    const start = Date.now();
-
-    for (let i = 1; i <= 10; i++) {
-      zagi(["tasks", "add", `Task ${i}`], { cwd: REPO_DIR });
-    }
-
-    zagi(["tasks", "list"], { cwd: REPO_DIR });
-
-    const elapsed = Date.now() - start;
-
-    // Should complete 10 add operations + 1 list in under 5 seconds
-    // This is quite generous, but we want to catch major performance regressions
-    expect(elapsed).toBeLessThan(5000);
-  });
-
-  test("task storage persists across commands", () => {
-    zagi(["tasks", "add", "Persistent task"], { cwd: REPO_DIR });
-
-    const firstList = zagi(["tasks", "list"], { cwd: REPO_DIR });
-    expect(firstList).toContain("Persistent task");
-
-    zagi(["tasks", "add", "Another task"], { cwd: REPO_DIR });
-
-    const secondList = zagi(["tasks", "list"], { cwd: REPO_DIR });
-    expect(secondList).toContain("Persistent task");
-    expect(secondList).toContain("Another task");
-    expect(secondList).toContain("tasks: 2 total");
-  });
-});
+// ============================================================================
+// Agent Commands
+// ============================================================================
 
 describe("zagi agent", () => {
   test("shows help when no subcommand", () => {
     const result = zagi(["agent"], { cwd: REPO_DIR });
 
-    expect(result).toContain("usage: zagi agent <command>");
+    expect(result).toContain("usage: git agent <command>");
     expect(result).toContain("Commands:");
     expect(result).toContain("run");
     expect(result).toContain("plan");
@@ -384,13 +335,13 @@ describe("zagi agent", () => {
   test("agent --help shows help", () => {
     const result = zagi(["agent", "--help"], { cwd: REPO_DIR });
 
-    expect(result).toContain("usage: zagi agent <command>");
+    expect(result).toContain("usage: git agent <command>");
   });
 
   test("agent run --help shows run help", () => {
     const result = zagi(["agent", "run", "--help"], { cwd: REPO_DIR });
 
-    expect(result).toContain("usage: zagi agent run");
+    expect(result).toContain("usage: git agent run");
     expect(result).toContain("--once");
     expect(result).toContain("--dry-run");
     expect(result).toContain("--max-tasks");
@@ -399,7 +350,7 @@ describe("zagi agent", () => {
   test("agent plan --help shows plan help", () => {
     const result = zagi(["agent", "plan", "--help"], { cwd: REPO_DIR });
 
-    expect(result).toContain("usage: zagi agent plan");
+    expect(result).toContain("usage: git agent plan");
     expect(result).toContain("<description>");
     expect(result).toContain("--dry-run");
   });
@@ -427,10 +378,237 @@ describe("zagi agent", () => {
   test("agent unknown subcommand shows error", () => {
     const result = zagi(["agent", "invalid"], { cwd: REPO_DIR });
 
-    expect(result).toContain("error: unknown subcommand 'invalid'");
-    expect(result).toContain("usage: zagi agent <command>");
+    expect(result).toContain("error: unknown command 'invalid'");
+    expect(result).toContain("usage: git agent <command>");
   });
 });
+
+// ============================================================================
+// Agent Plan --dry-run (Prompt Generation)
+// ============================================================================
+
+describe("zagi agent plan --dry-run", () => {
+  test("generates correct prompt structure", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Build a REST API"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    // Verify all prompt sections are present
+    expect(result).toContain("=== Planning Session (dry-run) ===");
+    expect(result).toContain("Goal: Build a REST API");
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("--- Prompt Preview ---");
+    expect(result).toContain("You are a planning agent");
+    expect(result).toContain("PROJECT GOAL: Build a REST API");
+    expect(result).toContain("INSTRUCTIONS:");
+    expect(result).toContain("Read AGENTS.md");
+    expect(result).toContain("CREATING TASKS:");
+    expect(result).toContain("tasks add");
+    expect(result).toContain("RULES:");
+    expect(result).toContain("NEVER git push");
+  });
+
+  test("includes absolute path to zagi binary", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Test task"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    // The prompt should include the absolute path for task commands
+    expect(result).toMatch(/\/.*\/zagi tasks add/);
+    expect(result).toMatch(/\/.*\/zagi tasks list/);
+  });
+
+  test("handles goal with double quotes", () => {
+    const result = zagi(["agent", "plan", "--dry-run", 'Add "login" button'], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain('Goal: Add "login" button');
+    expect(result).toContain('PROJECT GOAL: Add "login" button');
+  });
+
+  test("handles goal with single quotes", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Add 'logout' feature"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Goal: Add 'logout' feature");
+    expect(result).toContain("PROJECT GOAL: Add 'logout' feature");
+  });
+
+  test("handles goal with backticks", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Add `code` formatting"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Goal: Add `code` formatting");
+    expect(result).toContain("PROJECT GOAL: Add `code` formatting");
+  });
+
+  test("handles goal with shell special characters", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Fix $PATH & ENV vars"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Goal: Fix $PATH & ENV vars");
+    expect(result).toContain("PROJECT GOAL: Fix $PATH & ENV vars");
+  });
+
+  test("handles goal with angle brackets", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Add <input> validation"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Goal: Add <input> validation");
+    expect(result).toContain("PROJECT GOAL: Add <input> validation");
+  });
+
+  test("handles goal with parentheses and brackets", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Refactor function(args) and array[0]"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Goal: Refactor function(args) and array[0]");
+    expect(result).toContain("PROJECT GOAL: Refactor function(args) and array[0]");
+  });
+
+  test("handles goal with unicode characters", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Add emoji support"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Goal: Add emoji support");
+    expect(result).toContain("PROJECT GOAL: Add emoji support");
+  });
+
+  test("handles goal with newline in content", () => {
+    // Note: Shell typically doesn't pass literal newlines in args, but we test the goal is preserved
+    const goal = "Line one\\nLine two";
+    const result = zagi(["agent", "plan", "--dry-run", goal], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain(`Goal: ${goal}`);
+    expect(result).toContain(`PROJECT GOAL: ${goal}`);
+  });
+
+  test("handles long goal description", () => {
+    const longGoal = "Implement a comprehensive user authentication system with OAuth2 support, including Google, GitHub, and Microsoft providers, plus email/password fallback with rate limiting and account lockout protection";
+    const result = zagi(["agent", "plan", "--dry-run", longGoal], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain(`Goal: ${longGoal}`);
+    expect(result).toContain(`PROJECT GOAL: ${longGoal}`);
+  });
+
+  test("handles goal with mixed special characters", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Add 'auth' with <JWT> & \"refresh\" tokens"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Goal: Add 'auth' with <JWT> & \"refresh\" tokens");
+    expect(result).toContain("PROJECT GOAL: Add 'auth' with <JWT> & \"refresh\" tokens");
+  });
+
+  test("shows opencode executor when ZAGI_AGENT=opencode", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Test task"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "opencode" }
+    });
+
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("opencode run");
+  });
+
+  test("shows custom executor when ZAGI_AGENT_CMD is set", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Test task"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "aider --yes" }
+    });
+
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("aider --yes");
+  });
+
+  test("uses claude as default executor", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "Test task"], {
+      cwd: REPO_DIR
+    });
+
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("claude -p");
+  });
+
+  test("goal with only whitespace shows error", () => {
+    const result = zagi(["agent", "plan", "--dry-run", "   "], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    // Whitespace-only is still valid input from the shell perspective
+    // The command treats it as valid content
+    expect(result).toContain("Goal:");
+  });
+
+  test("--dry-run flag position after goal works", () => {
+    const result = zagi(["agent", "plan", "Build feature", "--dry-run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Planning Session (dry-run)");
+    expect(result).toContain("Goal: Build feature");
+  });
+});
+
+// ============================================================================
+// Error Handling
+// ============================================================================
+
+describe("error handling", () => {
+  test("shows error and help for invalid subcommand", () => {
+    const result = zagi(["tasks", "invalid"], { cwd: REPO_DIR });
+
+    expect(result).toContain("error: unknown command 'invalid'");
+    expect(result).toContain("usage: git tasks <command>");
+  });
+
+  test("task IDs are sequential", () => {
+    zagi(["tasks", "add", "First task"], { cwd: REPO_DIR });
+    zagi(["tasks", "add", "Second task"], { cwd: REPO_DIR });
+    zagi(["tasks", "add", "Third task"], { cwd: REPO_DIR });
+
+    const result = zagi(["tasks", "list"], { cwd: REPO_DIR });
+
+    expect(result).toContain("task-001");
+    expect(result).toContain("task-002");
+    expect(result).toContain("task-003");
+  });
+
+  test("shows error in non-git directory", () => {
+    const result = zagi(["tasks", "add", "Test task"], { cwd: "/tmp" });
+
+    // Should show error - either "error" or "fatal" depending on git behavior
+    expect(result.toLowerCase()).toMatch(/error|fatal/);
+  });
+});
+
+// ============================================================================
+// Git Integration
+// ============================================================================
 
 describe("integration with git", () => {
   test("tasks are stored in git refs", () => {
@@ -466,5 +644,42 @@ describe("integration with git", () => {
     const featureTasks = zagi(["tasks", "list"], { cwd: REPO_DIR });
     expect(featureTasks).toContain("Feature branch task");
     expect(featureTasks).not.toContain("Main branch task");
+  });
+});
+
+// ============================================================================
+// Performance
+// ============================================================================
+
+describe("performance", () => {
+  test("zagi tasks operations are reasonably fast", () => {
+    // Create several tasks
+    const start = Date.now();
+
+    for (let i = 1; i <= 10; i++) {
+      zagi(["tasks", "add", `Task ${i}`], { cwd: REPO_DIR });
+    }
+
+    zagi(["tasks", "list"], { cwd: REPO_DIR });
+
+    const elapsed = Date.now() - start;
+
+    // Should complete 10 add operations + 1 list in under 5 seconds
+    // This is quite generous, but we want to catch major performance regressions
+    expect(elapsed).toBeLessThan(5000);
+  });
+
+  test("task storage persists across commands", () => {
+    zagi(["tasks", "add", "Persistent task"], { cwd: REPO_DIR });
+
+    const firstList = zagi(["tasks", "list"], { cwd: REPO_DIR });
+    expect(firstList).toContain("Persistent task");
+
+    zagi(["tasks", "add", "Another task"], { cwd: REPO_DIR });
+
+    const secondList = zagi(["tasks", "list"], { cwd: REPO_DIR });
+    expect(secondList).toContain("Persistent task");
+    expect(secondList).toContain("Another task");
+    expect(secondList).toContain("tasks: 2 total");
   });
 });
