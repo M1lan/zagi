@@ -119,7 +119,20 @@ Instructions:
 3. Complete this ONE task only
 4. Verify your work (run tests, check build)
 5. Commit your changes with: git commit -m \"<message>\"
-6. Mark the task done: $ZAGI tasks done $TASK_ID
+6. Output a COMPLETION PROMISE (see below)
+7. Mark the task done: $ZAGI tasks done $TASK_ID
+
+COMPLETION PROMISE (required before marking task done):
+Before calling \`$ZAGI tasks done\`, you MUST output the following confirmation:
+
+COMPLETION PROMISE: I confirm that:
+- Tests pass: [which tests ran, summary of results]
+- Build succeeds: [build command used, confirmation of no errors]
+- Changes committed: [commit hash, commit message]
+- Only this task was modified: [list of files changed, confirm no scope creep]
+-- I have not taken any shortcuts or skipped any verification steps.
+
+Do NOT mark the task done without outputting this promise first.
 
 Rules:
 - NEVER git push (only commit)

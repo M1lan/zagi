@@ -1106,7 +1106,20 @@ fn createPrompt(allocator: std.mem.Allocator, executor: []const u8, exe_path: []
         \\2. Complete this ONE task only
         \\3. Verify your work (run tests, check build)
         \\4. Commit your changes with: git commit -m "<message>"
-        \\5. Mark the task done: {2s} tasks done {0s}
+        \\5. Output a COMPLETION PROMISE (see below)
+        \\6. Mark the task done: {2s} tasks done {0s}
+        \\
+        \\COMPLETION PROMISE (required before marking task done):
+        \\Before calling `{2s} tasks done`, you MUST output the following confirmation:
+        \\
+        \\COMPLETION PROMISE: I confirm that:
+        \\- Tests pass: [which tests ran, summary of results]
+        \\- Build succeeds: [build command used, confirmation of no errors]
+        \\- Changes committed: [commit hash, commit message]
+        \\- Only this task was modified: [list of files changed, confirm no scope creep]
+        \\-- I have not taken any shortcuts or skipped any verification steps.
+        \\
+        \\Do NOT mark the task done without outputting this promise first.
         \\
         \\Knowledge Persistence:
         \\If you discover important structural insights during this task, update {3s}:
