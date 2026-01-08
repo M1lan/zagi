@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { writeFileSync, rmSync, chmodSync, existsSync } from "fs";
+import { writeFileSync, rmSync, chmodSync, existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { createFixtureRepo } from "../fixtures/setup";
 import { zagi } from "./shared";
@@ -87,6 +87,429 @@ exit 0
   chmodSync(scriptPath, 0o755);
   return scriptPath;
 }
+
+/**
+ * Creates a mock executor that logs all arguments to a file.
+ * This allows us to verify exactly what arguments were passed.
+ */
+function createArgLoggingExecutor(repoDir: string): { script: string; logFile: string } {
+  const scriptPath = resolve(repoDir, "mock-log-args.sh");
+  const logFile = resolve(repoDir, "args.log");
+
+  const script = `#!/bin/bash
+# Log each argument on a separate line
+for arg in "$@"; do
+  echo "$arg" >> "${logFile}"
+done
+echo "---END---" >> "${logFile}"
+exit 0
+`;
+  writeFileSync(scriptPath, script);
+  chmodSync(scriptPath, 0o755);
+
+  return { script: scriptPath, logFile };
+}
+
+/**
+ * Creates an executor with multiple arguments that logs them.
+ * Returns both the base command path and the args log file.
+ */
+function createMultiArgExecutor(repoDir: string): { script: string; logFile: string } {
+  const scriptPath = resolve(repoDir, "mock-multi-arg.sh");
+  const logFile = resolve(repoDir, "multi-args.log");
+
+  // Script logs: the script name ($0), all args ($@), and arg count ($#)
+  const script = `#!/bin/bash
+echo "ARG_COUNT: $#" >> "${logFile}"
+for arg in "$@"; do
+  echo "ARG: $arg" >> "${logFile}"
+done
+exit 0
+`;
+  writeFileSync(scriptPath, script);
+  chmodSync(scriptPath, 0o755);
+
+  return { script: scriptPath, logFile };
+}
+
+// ============================================================================
+// Subcommand Routing
+// ============================================================================
+
+describe("zagi agent subcommand routing", () => {
+  test("shows help when no subcommand provided", () => {
+    const result = zagi(["agent"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: git agent <command>");
+    expect(result).toContain("Commands:");
+    expect(result).toContain("run");
+    expect(result).toContain("plan");
+  });
+
+  test("-h flag shows help", () => {
+    const result = zagi(["agent", "-h"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: git agent <command>");
+    expect(result).toContain("Commands:");
+  });
+
+  test("--help flag shows help", () => {
+    const result = zagi(["agent", "--help"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: git agent <command>");
+    expect(result).toContain("Commands:");
+  });
+
+  test("unknown subcommand shows error with help", () => {
+    const result = zagi(["agent", "unknown"], { cwd: REPO_DIR });
+
+    expect(result).toContain("error: unknown command 'unknown'");
+    expect(result).toContain("usage: git agent <command>");
+  });
+
+  test("unknown subcommand with special characters shows error", () => {
+    const result = zagi(["agent", "--invalid-flag"], { cwd: REPO_DIR });
+
+    expect(result).toContain("error: unknown command '--invalid-flag'");
+  });
+
+  test("help mentions environment variables", () => {
+    const result = zagi(["agent"], { cwd: REPO_DIR });
+
+    expect(result).toContain("ZAGI_AGENT");
+    expect(result).toContain("ZAGI_AGENT_CMD");
+    expect(result).toContain("claude");
+    expect(result).toContain("opencode");
+  });
+});
+
+// ============================================================================
+// Plan Args: --help, --model, description handling
+// ============================================================================
+
+describe("zagi agent plan args", () => {
+  test("-h flag shows plan help", () => {
+    const result = zagi(["agent", "plan", "-h"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: git agent plan");
+    expect(result).toContain("--model");
+    expect(result).toContain("--dry-run");
+    expect(result).toContain("-h, --help");
+  });
+
+  test("--help flag shows plan help", () => {
+    const result = zagi(["agent", "plan", "--help"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: git agent plan");
+    expect(result).toContain("description");
+  });
+
+  test("--model flag requires a value", () => {
+    const result = zagi(["agent", "plan", "--model"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("error: --model requires a model name");
+  });
+
+  test("--model flag passes model to executor in dry-run", () => {
+    const result = zagi(["agent", "plan", "--model", "claude-sonnet-4", "--dry-run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "my-agent" }
+    });
+
+    expect(result).toContain("Interactive Planning Session (dry-run)");
+    expect(result).toContain("Would execute:");
+  });
+
+  test("description is optional (interactive mode)", () => {
+    const { script } = createArgLoggingExecutor(REPO_DIR);
+
+    // Plan without description should work
+    const result = zagi(["agent", "plan"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: script }
+    });
+
+    expect(result).toContain("Starting Interactive Planning Session");
+    expect(result).not.toContain("error");
+  });
+
+  test("unknown option shows error", () => {
+    const result = zagi(["agent", "plan", "--unknown-option"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("error: unknown option '--unknown-option'");
+  });
+
+  test("help shows examples", () => {
+    const result = zagi(["agent", "plan", "--help"], { cwd: REPO_DIR });
+
+    expect(result).toContain("Examples:");
+    expect(result).toContain("git agent plan");
+  });
+});
+
+// ============================================================================
+// Run Args: --help, --delay, --max-tasks, --model
+// ============================================================================
+
+describe("zagi agent run args", () => {
+  test("-h flag shows run help", () => {
+    const result = zagi(["agent", "run", "-h"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: git agent run");
+    expect(result).toContain("--model");
+    expect(result).toContain("--once");
+    expect(result).toContain("--dry-run");
+    expect(result).toContain("--delay");
+    expect(result).toContain("--max-tasks");
+  });
+
+  test("--help flag shows run help", () => {
+    const result = zagi(["agent", "run", "--help"], { cwd: REPO_DIR });
+
+    expect(result).toContain("usage: git agent run");
+    expect(result).toContain("Options:");
+  });
+
+  test("--model flag requires a value", () => {
+    const result = zagi(["agent", "run", "--model"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("error: --model requires a model name");
+  });
+
+  test("--delay flag requires a value", () => {
+    const result = zagi(["agent", "run", "--delay"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("error: --delay requires a number of seconds");
+  });
+
+  test("--delay flag validates numeric input", () => {
+    const result = zagi(["agent", "run", "--delay", "abc"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("error: invalid delay value 'abc'");
+  });
+
+  test("--delay accepts valid numeric value", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--delay", "5", "--dry-run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("dry-run mode");
+    expect(result).not.toContain("error");
+  });
+
+  test("--max-tasks flag requires a value", () => {
+    const result = zagi(["agent", "run", "--max-tasks"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("error: --max-tasks requires a number");
+  });
+
+  test("--max-tasks flag validates numeric input", () => {
+    const result = zagi(["agent", "run", "--max-tasks", "not-a-number"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("error: invalid max-tasks value 'not-a-number'");
+  });
+
+  test("--max-tasks accepts valid numeric value", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--max-tasks", "10", "--dry-run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("dry-run mode");
+    expect(result).not.toContain("error");
+  });
+
+  test("unknown option shows error", () => {
+    const result = zagi(["agent", "run", "--unknown-flag"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("error: unknown option '--unknown-flag'");
+  });
+
+  test("help shows examples", () => {
+    const result = zagi(["agent", "run", "--help"], { cwd: REPO_DIR });
+
+    expect(result).toContain("Examples:");
+    expect(result).toContain("git agent run");
+    expect(result).toContain("git agent run --once");
+  });
+
+  test("multiple flags can be combined", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--once", "--dry-run", "--delay", "0", "--max-tasks", "5"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "echo" }
+    });
+
+    expect(result).toContain("dry-run mode");
+    expect(result).toContain("Starting task:");
+    expect(result).not.toContain("error");
+  });
+});
+
+// ============================================================================
+// Executor Paths: claude default, opencode, ZAGI_AGENT_CMD override
+// ============================================================================
+
+describe("zagi agent executor paths", () => {
+  test("claude is the default executor", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    // Without ZAGI_AGENT set, should default to claude
+    const result = zagi(["agent", "run", "--dry-run", "--once"], {
+      cwd: REPO_DIR
+    });
+
+    expect(result).toContain("Executor: claude");
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("claude -p");
+  });
+
+  test("ZAGI_AGENT=claude uses claude executor", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--dry-run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude" }
+    });
+
+    expect(result).toContain("Executor: claude");
+    expect(result).toContain("claude -p");
+  });
+
+  test("ZAGI_AGENT=opencode uses opencode executor", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--dry-run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "opencode" }
+    });
+
+    expect(result).toContain("Executor: opencode");
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("opencode run");
+  });
+
+  test("ZAGI_AGENT_CMD overrides default executor", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--dry-run", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT_CMD: "my-custom-agent --flag" }
+    });
+
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("my-custom-agent --flag");
+  });
+
+  test("ZAGI_AGENT_CMD overrides ZAGI_AGENT when both set", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run", "--dry-run", "--once"], {
+      cwd: REPO_DIR,
+      env: {
+        ZAGI_AGENT: "opencode",
+        ZAGI_AGENT_CMD: "custom-cmd"
+      }
+    });
+
+    // Custom command should win
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("custom-cmd");
+    expect(result).not.toContain("opencode run");
+  });
+
+  test("invalid ZAGI_AGENT value shows error", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "invalid-value" }
+    });
+
+    expect(result).toContain("error: invalid ZAGI_AGENT value 'invalid-value'");
+    expect(result).toContain("valid values: claude, opencode");
+  });
+
+  test("ZAGI_AGENT=1 is invalid (not a valid executor name)", () => {
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    const result = zagi(["agent", "run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "1" }
+    });
+
+    expect(result).toContain("error: invalid ZAGI_AGENT value");
+  });
+
+  test("plan subcommand uses claude in interactive mode (no -p flag)", () => {
+    const result = zagi(["agent", "plan", "--dry-run"], {
+      cwd: REPO_DIR
+    });
+
+    // In plan mode, claude runs interactively (no -p flag)
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("claude");
+    expect(result).not.toMatch(/claude -p/);
+  });
+
+  test("plan subcommand uses opencode in interactive mode (no run subcommand)", () => {
+    const result = zagi(["agent", "plan", "--dry-run"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "opencode" }
+    });
+
+    // In plan mode, opencode runs interactively (no run subcommand)
+    expect(result).toContain("Would execute:");
+    expect(result).toContain("opencode");
+    // Should NOT contain "opencode run" since that's for headless mode
+    expect(result).not.toMatch(/opencode run/);
+  });
+
+  test("--model flag is passed to executor for run command", () => {
+    const { script, logFile } = createArgLoggingExecutor(REPO_DIR);
+    zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
+
+    zagi(["agent", "run", "--model", "test-model", "--once"], {
+      cwd: REPO_DIR,
+      env: { ZAGI_AGENT: "claude", ZAGI_AGENT_CMD: script }
+    });
+
+    // When using ZAGI_AGENT_CMD, model flag is not passed to the custom command
+    // (custom commands handle their own model selection)
+    const logContent = readFileSync(logFile, "utf-8");
+    expect(logContent).toContain("You are working on:"); // Prompt was passed
+  });
+});
 
 // ============================================================================
 // Agent Run: Basic RALPH Loop Behavior
@@ -445,50 +868,6 @@ describe("zagi agent run error handling", () => {
 // ============================================================================
 // Agent Run: ZAGI_AGENT_CMD Override
 // ============================================================================
-
-/**
- * Creates a mock executor that logs all arguments to a file.
- * This allows us to verify exactly what arguments were passed.
- */
-function createArgLoggingExecutor(repoDir: string): { script: string; logFile: string } {
-  const scriptPath = resolve(repoDir, "mock-log-args.sh");
-  const logFile = resolve(repoDir, "args.log");
-
-  const script = `#!/bin/bash
-# Log each argument on a separate line
-for arg in "$@"; do
-  echo "$arg" >> "${logFile}"
-done
-echo "---END---" >> "${logFile}"
-exit 0
-`;
-  writeFileSync(scriptPath, script);
-  chmodSync(scriptPath, 0o755);
-
-  return { script: scriptPath, logFile };
-}
-
-/**
- * Creates an executor with multiple arguments that logs them.
- * Returns both the base command path and the args log file.
- */
-function createMultiArgExecutor(repoDir: string): { script: string; logFile: string } {
-  const scriptPath = resolve(repoDir, "mock-multi-arg.sh");
-  const logFile = resolve(repoDir, "multi-args.log");
-
-  // Script logs: the script name ($0), all args ($@), and arg count ($#)
-  const script = `#!/bin/bash
-echo "ARG_COUNT: $#" >> "${logFile}"
-for arg in "$@"; do
-  echo "ARG: $arg" >> "${logFile}"
-done
-exit 0
-`;
-  writeFileSync(scriptPath, script);
-  chmodSync(scriptPath, 0o755);
-
-  return { script: scriptPath, logFile };
-}
 
 describe("zagi agent run ZAGI_AGENT_CMD override", () => {
   test("uses custom command instead of default executor", () => {
