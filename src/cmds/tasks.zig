@@ -1779,6 +1779,31 @@ test "appendToTask - empty addition" {
     try testing.expectEqualStrings("Original\n---\n", result);
 }
 
+test "appendToTask - content with newlines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Test appending content that contains newlines
+    const result = try appendToTask(allocator, "Original task", "Line 1\nLine 2\nLine 3");
+    defer allocator.free(result);
+
+    // The append function preserves newlines - escaping happens at storage layer
+    try testing.expectEqualStrings("Original task\n---\nLine 1\nLine 2\nLine 3", result);
+}
+
+test "appendToTask - both original and addition have newlines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Test when both original content and addition have newlines
+    const result = try appendToTask(allocator, "Task line 1\nTask line 2", "Note line 1\nNote line 2");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("Task line 1\nTask line 2\n---\nNote line 1\nNote line 2", result);
+}
+
 test "escapeContentForStorage - handles newlines" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
