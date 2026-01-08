@@ -1,7 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { resolve } from "path";
-import { writeFileSync, appendFileSync, rmSync } from "fs";
-import { createFixtureRepo } from "../fixtures/setup";
+import { writeFileSync, appendFileSync } from "fs";
 import { zagi, git, createTestRepo, cleanupTestRepo } from "./shared";
 
 let REPO_DIR: string;
@@ -12,14 +11,13 @@ function stageTestFile() {
   git(["add", "commit-test.txt"], { cwd: REPO_DIR });
 }
 
+// Use lightweight repo - these tests don't need multiple commits
 beforeEach(() => {
-  REPO_DIR = createFixtureRepo();
+  REPO_DIR = createTestRepo();
 });
 
 afterEach(() => {
-  if (REPO_DIR) {
-    rmSync(REPO_DIR, { recursive: true, force: true });
-  }
+  cleanupTestRepo(REPO_DIR);
 });
 
 describe("zagi commit", () => {

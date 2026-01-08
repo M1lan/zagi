@@ -1,18 +1,15 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { rmSync } from "fs";
-import { createFixtureRepo } from "../fixtures/setup";
-import { zagi, git } from "./shared";
+import { zagi, git, createTestRepo, cleanupTestRepo } from "./shared";
 
 let REPO_DIR: string;
 
+// Use lightweight repo - these tests don't need multiple commits
 beforeEach(() => {
-  REPO_DIR = createFixtureRepo();
+  REPO_DIR = createTestRepo();
 });
 
 afterEach(() => {
-  if (REPO_DIR) {
-    rmSync(REPO_DIR, { recursive: true, force: true });
-  }
+  cleanupTestRepo(REPO_DIR);
 });
 
 // ============================================================================
