@@ -31,13 +31,20 @@ const run_help =
     \\  --delay <seconds>    Delay between tasks (default: 2)
     \\  --max-tasks <n>      Stop after n tasks (safety limit)
     \\  --parallel <n>       Run n tasks in parallel (default: 1)
+    \\  --output-format <f>  Output format: text (default) or stream-json
     \\  -h, --help           Show this help message
+    \\
+    \\Output Formats:
+    \\  text         Human-readable output (default)
+    \\  stream-json  Streaming JSON for real-time visibility
+    \\               Output is logged to logs/<task-id>.json
     \\
     \\Examples:
     \\  git agent run
     \\  git agent run --once
     \\  git agent run --dry-run
     \\  git agent run --parallel 3
+    \\  git agent run --output-format stream-json
     \\  ZAGI_AGENT=opencode git agent run
     \\
 ;
@@ -490,6 +497,7 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     var delay: u32 = 2;
     var max_tasks: ?u32 = null;
     var parallel: u32 = 1;
+    var stream_json = false;
 
     var i: usize = 3; // Start after "zagi agent run"
     while (i < args.len) {
@@ -541,6 +549,21 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             };
             if (parallel == 0) {
                 stdout.print("error: --parallel must be at least 1\n", .{}) catch {};
+                return Error.InvalidCommand;
+            }
+        } else if (std.mem.eql(u8, arg, "--output-format")) {
+            i += 1;
+            if (i >= args.len) {
+                stdout.print("error: --output-format requires a format (text or stream-json)\n", .{}) catch {};
+                return Error.InvalidCommand;
+            }
+            const format_str = std.mem.sliceTo(args[i], 0);
+            if (std.mem.eql(u8, format_str, "stream-json")) {
+                stream_json = true;
+            } else if (std.mem.eql(u8, format_str, "text")) {
+                stream_json = false;
+            } else {
+                stdout.print("error: invalid output format '{s}' (use 'text' or 'stream-json')\n", .{format_str}) catch {};
                 return Error.InvalidCommand;
             }
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -622,6 +645,9 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     if (parallel > 1) {
         stdout.print(" (parallel: {})", .{parallel}) catch {};
     }
+    if (stream_json) {
+        stdout.print(" (output: stream-json)", .{}) catch {};
+    }
     stdout.print("\n\n", .{}) catch {};
 
     if (parallel > 1) {
@@ -690,11 +716,14 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 
             if (dry_run) {
                 stdout.print("Would execute:\n", .{}) catch {};
-                stdout.print("  {s} \"<prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, false, false)}) catch {};
+                stdout.print("  {s} \"<prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, false, stream_json)}) catch {};
+                if (stream_json) {
+                    stdout.print("  Output: logs/{s}.json\n", .{task.id}) catch {};
+                }
                 stdout.print("\n", .{}) catch {};
                 tasks_completed += 1;
             } else {
-                const success = executeTaskStreaming(allocator, executor, model, agent_cmd, exe_path, task.id, task.content, false) catch false;
+                const success = executeTaskStreaming(allocator, executor, model, agent_cmd, exe_path, task.id, task.content, stream_json) catch false;
 
                 if (success) {
                     updateFailureCount(allocator, &consecutive_failures, task.id, 0);
