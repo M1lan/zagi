@@ -30,21 +30,12 @@ const run_help =
     \\  --dry-run            Show what would run without executing
     \\  --delay <seconds>    Delay between tasks (default: 2)
     \\  --max-tasks <n>      Stop after n tasks (safety limit)
-    \\  --parallel <n>       Run n tasks in parallel (default: 1)
-    \\  --output-format <f>  Output format: text (default) or stream-json
     \\  -h, --help           Show this help message
-    \\
-    \\Output Formats:
-    \\  text         Human-readable output (default)
-    \\  stream-json  Streaming JSON for real-time visibility
-    \\               Output is logged to logs/<task-id>.json
     \\
     \\Examples:
     \\  git agent run
     \\  git agent run --once
     \\  git agent run --dry-run
-    \\  git agent run --parallel 3
-    \\  git agent run --output-format stream-json
     \\  ZAGI_AGENT=opencode git agent run
     \\
 ;
@@ -100,9 +91,6 @@ fn logToFile(allocator: std.mem.Allocator, file: ?std.fs.File, comptime fmt: []c
 /// autonomous task execution):
 /// - interactive=true: Claude runs without -p, opencode uses plain mode
 /// - interactive=false: Claude runs with -p (print mode), opencode uses run mode
-///
-/// The `stream_json` parameter enables streaming JSON output for real-time
-/// visibility (Claude's --output-format stream-json).
 fn buildExecutorArgs(
     allocator: std.mem.Allocator,
     executor: []const u8,
@@ -110,7 +98,6 @@ fn buildExecutorArgs(
     agent_cmd: ?[]const u8,
     prompt: []const u8,
     interactive: bool,
-    stream_json: bool,
 ) !std.ArrayList([]const u8) {
     var args = std.ArrayList([]const u8){};
     errdefer args.deinit(allocator);
@@ -126,11 +113,6 @@ fn buildExecutorArgs(
         if (!interactive) {
             // Use -p (print mode) for headless/non-interactive execution
             try args.append(allocator, "-p");
-        }
-        if (stream_json) {
-            // Enable streaming JSON for real-time visibility
-            try args.append(allocator, "--output-format");
-            try args.append(allocator, "stream-json");
         }
         if (model) |m| {
             try args.append(allocator, "--model");
@@ -161,13 +143,11 @@ fn buildExecutorArgs(
 }
 
 /// Formats the executor command for dry-run display.
-/// The `interactive` and `stream_json` parameters mirror buildExecutorArgs behavior.
-fn formatExecutorCommand(executor: []const u8, agent_cmd: ?[]const u8, interactive: bool, stream_json: bool) []const u8 {
+/// The `interactive` parameter mirrors the buildExecutorArgs behavior.
+fn formatExecutorCommand(executor: []const u8, agent_cmd: ?[]const u8, interactive: bool) []const u8 {
     if (agent_cmd) |cmd| return cmd;
     if (std.mem.eql(u8, executor, "claude")) {
-        if (interactive) return "claude";
-        if (stream_json) return "claude -p --output-format stream-json";
-        return "claude -p";
+        return if (interactive) "claude" else "claude -p";
     }
     if (std.mem.eql(u8, executor, "opencode")) {
         return if (interactive) "opencode" else "opencode run";
@@ -410,7 +390,7 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
             stdout.print("Initial context: (none - will ask user)\n\n", .{}) catch {};
         }
         stdout.print("Would execute:\n", .{}) catch {};
-        stdout.print("  {s} \"<planning prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, true, false)}) catch {};
+        stdout.print("  {s} \"<planning prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, true)}) catch {};
         stdout.print("\n--- Prompt Preview ---\n{s}\n", .{prompt}) catch {};
         return;
     }
@@ -433,8 +413,7 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     }
 
     // Build and execute command in interactive mode (user converses with agent)
-    // No stream-json for interactive mode since user needs human-readable output
-    var runner_args = buildExecutorArgs(allocator, executor, model, agent_cmd, prompt, true, false) catch return Error.OutOfMemory;
+    var runner_args = buildExecutorArgs(allocator, executor, model, agent_cmd, prompt, true) catch return Error.OutOfMemory;
     defer runner_args.deinit(allocator);
 
     var child = std.process.Child.init(runner_args.items, allocator);
@@ -496,8 +475,6 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     var dry_run = false;
     var delay: u32 = 2;
     var max_tasks: ?u32 = null;
-    var parallel: u32 = 1;
-    var stream_json = false;
 
     var i: usize = 3; // Start after "zagi agent run"
     while (i < args.len) {
@@ -536,36 +513,6 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
                 stdout.print("error: invalid max-tasks value '{s}'\n", .{max_str}) catch {};
                 return Error.InvalidCommand;
             };
-        } else if (std.mem.eql(u8, arg, "--parallel")) {
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --parallel requires a number\n", .{}) catch {};
-                return Error.InvalidCommand;
-            }
-            const parallel_str = std.mem.sliceTo(args[i], 0);
-            parallel = std.fmt.parseInt(u32, parallel_str, 10) catch {
-                stdout.print("error: invalid parallel value '{s}'\n", .{parallel_str}) catch {};
-                return Error.InvalidCommand;
-            };
-            if (parallel == 0) {
-                stdout.print("error: --parallel must be at least 1\n", .{}) catch {};
-                return Error.InvalidCommand;
-            }
-        } else if (std.mem.eql(u8, arg, "--output-format")) {
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --output-format requires a format (text or stream-json)\n", .{}) catch {};
-                return Error.InvalidCommand;
-            }
-            const format_str = std.mem.sliceTo(args[i], 0);
-            if (std.mem.eql(u8, format_str, "stream-json")) {
-                stream_json = true;
-            } else if (std.mem.eql(u8, format_str, "text")) {
-                stream_json = false;
-            } else {
-                stdout.print("error: invalid output format '{s}' (use 'text' or 'stream-json')\n", .{format_str}) catch {};
-                return Error.InvalidCommand;
-            }
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             stdout.print("{s}", .{run_help}) catch {};
             return;
@@ -642,173 +589,9 @@ fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
     if (model) |m| {
         stdout.print(" (model: {s})", .{m}) catch {};
     }
-    if (parallel > 1) {
-        stdout.print(" (parallel: {})", .{parallel}) catch {};
-    }
-    if (stream_json) {
-        stdout.print(" (output: stream-json)", .{}) catch {};
-    }
     stdout.print("\n\n", .{}) catch {};
 
-    if (parallel > 1) {
-        // Parallel execution: run multiple tasks concurrently
-        tasks_completed = runParallelLoop(
-            allocator,
-            executor,
-            model,
-            agent_cmd,
-            exe_path,
-            &consecutive_failures,
-            log_file,
-            parallel,
-            max_tasks,
-            delay,
-            dry_run,
-            once,
-        ) catch |err| {
-            stderr.print("error: parallel execution failed: {s}\n", .{@errorName(err)}) catch {};
-            return Error.TaskLoadFailed;
-        };
-    } else {
-        // Sequential execution: original single-task loop
-        while (true) {
-            if (max_tasks) |max| {
-                if (tasks_completed >= max) {
-                    stdout.print("Reached maximum task limit ({})\n", .{max}) catch {};
-                    break;
-                }
-            }
-
-            const pending = getPendingTasks(allocator) catch {
-                stderr.print("error: failed to load tasks\n", .{}) catch {};
-                return Error.TaskLoadFailed;
-            };
-            defer allocator.free(pending.tasks);
-            defer for (pending.tasks) |t| {
-                allocator.free(t.id);
-                allocator.free(t.content);
-            };
-
-            if (pending.tasks.len == 0) {
-                stdout.print("No pending tasks remaining. All tasks complete!\n", .{}) catch {};
-                stdout.print("Run: zagi tasks pr\n", .{}) catch {};
-                break;
-            }
-
-            var next_task: ?PendingTask = null;
-            for (pending.tasks) |task| {
-                const failure_count = consecutive_failures.get(task.id) orelse 0;
-                if (failure_count < 3) {
-                    next_task = task;
-                    break;
-                }
-            }
-
-            if (next_task == null) {
-                stdout.print("All remaining tasks have failed 3+ times. Stopping.\n", .{}) catch {};
-                break;
-            }
-
-            const task = next_task.?;
-            stdout.print("Starting task: {s}\n", .{task.id}) catch {};
-            stdout.print("  {s}\n\n", .{task.content}) catch {};
-            logToFile(allocator, log_file, "Starting task: {s} - {s}\n", .{ task.id, task.content });
-
-            if (dry_run) {
-                stdout.print("Would execute:\n", .{}) catch {};
-                stdout.print("  {s} \"<prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, false, stream_json)}) catch {};
-                if (stream_json) {
-                    stdout.print("  Output: logs/{s}.json\n", .{task.id}) catch {};
-                }
-                stdout.print("\n", .{}) catch {};
-                tasks_completed += 1;
-            } else {
-                const success = executeTaskStreaming(allocator, executor, model, agent_cmd, exe_path, task.id, task.content, stream_json) catch false;
-
-                if (success) {
-                    updateFailureCount(allocator, &consecutive_failures, task.id, 0);
-                    tasks_completed += 1;
-                    stdout.print("Task completed successfully\n\n", .{}) catch {};
-                    logToFile(allocator, log_file, "Task {s} completed successfully\n", .{task.id});
-                } else {
-                    const new_failures = (consecutive_failures.get(task.id) orelse 0) + 1;
-                    updateFailureCount(allocator, &consecutive_failures, task.id, new_failures);
-                    stdout.print("Task failed ({} consecutive failures)\n", .{new_failures}) catch {};
-                    logToFile(allocator, log_file, "Task {s} failed ({} consecutive failures)\n", .{ task.id, new_failures });
-                    if (new_failures >= 3) {
-                        stdout.print("Skipping task after 3 consecutive failures\n", .{}) catch {};
-                    }
-                    stdout.print("\n", .{}) catch {};
-                }
-            }
-
-            if (once) {
-                stdout.print("Exiting after one task (--once flag set)\n", .{}) catch {};
-                break;
-            }
-
-            if (!dry_run and delay > 0) {
-                stdout.print("Waiting {} seconds before next task...\n\n", .{delay}) catch {};
-                std.Thread.sleep(delay * std.time.ns_per_s);
-            }
-        }
-    }
-
-    stdout.print("RALPH loop completed. {} tasks processed.\n", .{tasks_completed}) catch {};
-    logToFile(allocator, log_file, "=== RALPH loop completed: {} tasks processed ===\n\n", .{tasks_completed});
-}
-
-/// Tracks a running task for parallel execution.
-const RunningTask = struct {
-    id: []const u8,
-    content: []const u8,
-    child: std.process.Child,
-};
-
-/// Runs the parallel execution loop with N concurrent tasks.
-///
-/// This spawns up to `parallel` tasks simultaneously, streaming their output
-/// to individual JSON log files. When any task completes, it spawns a new one
-/// to maintain the parallelism level until all tasks are done.
-///
-/// Returns the total number of tasks completed.
-fn runParallelLoop(
-    allocator: std.mem.Allocator,
-    executor: []const u8,
-    model: ?[]const u8,
-    agent_cmd: ?[]const u8,
-    exe_path: []const u8,
-    consecutive_failures: *std.StringHashMap(u32),
-    main_log: ?std.fs.File,
-    parallel: u32,
-    max_tasks: ?u32,
-    delay: u32,
-    dry_run: bool,
-    once: bool,
-) !u32 {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-
-    var tasks_completed: u32 = 0;
-    var running = std.ArrayList(RunningTask){};
-    defer running.deinit(allocator);
-
-    // Track processed tasks for dry-run mode (prevents infinite loop)
-    var processed_tasks = std.StringHashMap(void).init(allocator);
-    defer {
-        var key_iter = processed_tasks.keyIterator();
-        while (key_iter.next()) |key_ptr| {
-            allocator.free(key_ptr.*);
-        }
-        processed_tasks.deinit();
-    }
-
-    // Ensure logs directory exists
-    std.fs.cwd().makeDir("logs") catch |err| {
-        if (err != error.PathAlreadyExists) return err;
-    };
-
     while (true) {
-        // Check max tasks limit
         if (max_tasks) |max| {
             if (tasks_completed >= max) {
                 stdout.print("Reached maximum task limit ({})\n", .{max}) catch {};
@@ -816,223 +599,79 @@ fn runParallelLoop(
             }
         }
 
-        // Get pending tasks
-        const pending = try getPendingTasks(allocator);
+        const pending = getPendingTasks(allocator) catch {
+            stderr.print("error: failed to load tasks\n", .{}) catch {};
+            return Error.TaskLoadFailed;
+        };
         defer allocator.free(pending.tasks);
         defer for (pending.tasks) |t| {
             allocator.free(t.id);
             allocator.free(t.content);
         };
 
-        // Get list of currently running task IDs
-        var running_ids = std.StringHashMap(void).init(allocator);
-        defer running_ids.deinit();
-        for (running.items) |r| {
-            running_ids.put(r.id, {}) catch {};
-        }
-
-        // Find eligible tasks (not running, not failed 3x, not processed in dry-run)
-        var eligible = std.ArrayList(PendingTask){};
-        defer eligible.deinit(allocator);
-        for (pending.tasks) |task| {
-            // Skip if already running
-            if (running_ids.contains(task.id)) continue;
-            // Skip if failed 3+ times
-            const failure_count = consecutive_failures.get(task.id) orelse 0;
-            if (failure_count >= 3) continue;
-            // Skip if already processed (dry-run mode tracking)
-            if (processed_tasks.contains(task.id)) continue;
-            eligible.append(allocator, task) catch continue;
-        }
-
-        // Check termination conditions
-        if (running.items.len == 0 and eligible.items.len == 0) {
-            if (pending.tasks.len == 0) {
-                stdout.print("No pending tasks remaining. All tasks complete!\n", .{}) catch {};
-                stdout.print("Run: zagi tasks pr\n", .{}) catch {};
-            } else {
-                stdout.print("All remaining tasks have failed 3+ times. Stopping.\n", .{}) catch {};
-            }
+        if (pending.tasks.len == 0) {
+            stdout.print("No pending tasks remaining. All tasks complete!\n", .{}) catch {};
+            stdout.print("Run: zagi tasks pr\n", .{}) catch {};
             break;
         }
 
-        // Spawn new tasks up to parallel limit
-        const slots_available = parallel - @as(u32, @intCast(running.items.len));
-        const to_spawn = @min(slots_available, @as(u32, @intCast(eligible.items.len)));
-
-        for (eligible.items[0..to_spawn]) |task| {
-            stdout.print("Starting task: {s}\n", .{task.id}) catch {};
-            stdout.print("  {s}\n", .{task.content}) catch {};
-            logToFile(allocator, main_log, "Starting task: {s} - {s}\n", .{ task.id, task.content });
-
-            if (dry_run) {
-                stdout.print("Would execute:\n", .{}) catch {};
-                stdout.print("  {s} \"<prompt>\" > logs/{s}.json\n", .{ formatExecutorCommand(executor, agent_cmd, false, true), task.id }) catch {};
-                stdout.print("\n", .{}) catch {};
-                tasks_completed += 1;
-                // Track this task as processed to avoid re-selecting it
-                const task_id_dupe = allocator.dupe(u8, task.id) catch continue;
-                processed_tasks.put(task_id_dupe, {}) catch allocator.free(task_id_dupe);
-                continue;
-            }
-
-            // Create prompt
-            const prompt = createPrompt(allocator, executor, exe_path, task.id, task.content) catch continue;
-
-            // Build args with streaming enabled
-            var runner_args = buildExecutorArgs(allocator, executor, model, agent_cmd, prompt, false, true) catch {
-                allocator.free(prompt);
-                continue;
-            };
-
-            // Create log file for this task
-            const log_filename = std.fmt.allocPrint(allocator, "logs/{s}.json", .{task.id}) catch {
-                runner_args.deinit(allocator);
-                allocator.free(prompt);
-                continue;
-            };
-            defer allocator.free(log_filename);
-
-            var task_log = std.fs.cwd().createFile(log_filename, .{}) catch {
-                runner_args.deinit(allocator);
-                allocator.free(prompt);
-                continue;
-            };
-
-            stdout.print("  Streaming to: {s}\n\n", .{log_filename}) catch {};
-
-            // Build shell command with redirection to log file
-            // Join args into a single command string
-            var cmd_builder = std.ArrayList(u8){};
-            defer cmd_builder.deinit(allocator);
-            for (runner_args.items, 0..) |arg, idx| {
-                if (idx > 0) cmd_builder.append(allocator, ' ') catch continue;
-                // Quote the argument
-                cmd_builder.append(allocator, '\'') catch continue;
-                for (arg) |char| {
-                    if (char == '\'') {
-                        cmd_builder.appendSlice(allocator, "'\\''") catch continue;
-                    } else {
-                        cmd_builder.append(allocator, char) catch continue;
-                    }
-                }
-                cmd_builder.append(allocator, '\'') catch continue;
-            }
-            cmd_builder.appendSlice(allocator, " > ") catch continue;
-            cmd_builder.appendSlice(allocator, log_filename) catch continue;
-
-            const shell_cmd = cmd_builder.items;
-
-            // Spawn through shell to handle redirection
-            var child = std.process.Child.init(&.{ "/bin/sh", "-c", shell_cmd }, allocator);
-            child.stdout_behavior = .Inherit;
-            child.stderr_behavior = .Inherit;
-
-            child.spawn() catch {
-                task_log.close();
-                runner_args.deinit(allocator);
-                allocator.free(prompt);
-                continue;
-            };
-
-            // Close our handle to the log file - the shell will write to it
-            task_log.close();
-
-            // Track running task - duplicate the id and content since pending will be freed
-            const id_dupe = allocator.dupe(u8, task.id) catch continue;
-            const content_dupe = allocator.dupe(u8, task.content) catch {
-                allocator.free(id_dupe);
-                continue;
-            };
-
-            running.append(allocator, .{
-                .id = id_dupe,
-                .content = content_dupe,
-                .child = child,
-            }) catch {
-                allocator.free(id_dupe);
-                allocator.free(content_dupe);
-            };
-
-            // Clean up args and prompt (child has inherited what it needs)
-            runner_args.deinit(allocator);
-            allocator.free(prompt);
-
-            if (once) break;
-        }
-
-        if (dry_run and eligible.items.len > 0) {
-            // In dry run, we counted tasks above, now check if done
-            if (once or (max_tasks != null and tasks_completed >= max_tasks.?)) {
+        var next_task: ?PendingTask = null;
+        for (pending.tasks) |task| {
+            const failure_count = consecutive_failures.get(task.id) orelse 0;
+            if (failure_count < 3) {
+                next_task = task;
                 break;
             }
-            continue;
         }
 
-        // Wait for any running task to complete
-        if (running.items.len > 0) {
-            // Poll all running tasks to find completed ones
-            var i: usize = 0;
-            while (i < running.items.len) {
-                var task_entry = &running.items[i];
+        if (next_task == null) {
+            stdout.print("All remaining tasks have failed 3+ times. Stopping.\n", .{}) catch {};
+            break;
+        }
 
-                // Try non-blocking wait
-                const result = task_entry.child.wait() catch null;
+        const task = next_task.?;
+        stdout.print("Starting task: {s}\n", .{task.id}) catch {};
+        stdout.print("  {s}\n\n", .{task.content}) catch {};
+        logToFile(allocator, log_file, "Starting task: {s} - {s}\n", .{ task.id, task.content });
 
-                if (result) |term| {
-                    // Task completed
-                    const success = term == .Exited and term.Exited == 0;
+        if (dry_run) {
+            stdout.print("Would execute:\n", .{}) catch {};
+            stdout.print("  {s} \"<prompt>\"\n", .{formatExecutorCommand(executor, agent_cmd, false)}) catch {};
+            stdout.print("\n", .{}) catch {};
+            tasks_completed += 1;
+        } else {
+            const success = executeTask(allocator, executor, model, agent_cmd, exe_path, task.id, task.content) catch false;
 
-                    if (success) {
-                        updateFailureCount(allocator, consecutive_failures, task_entry.id, 0);
-                        tasks_completed += 1;
-                        stdout.print("Task {s} completed successfully\n", .{task_entry.id}) catch {};
-                        logToFile(allocator, main_log, "Task {s} completed successfully\n", .{task_entry.id});
-                    } else {
-                        const new_failures = (consecutive_failures.get(task_entry.id) orelse 0) + 1;
-                        updateFailureCount(allocator, consecutive_failures, task_entry.id, new_failures);
-                        stdout.print("Task {s} failed ({} consecutive failures)\n", .{ task_entry.id, new_failures }) catch {};
-                        logToFile(allocator, main_log, "Task {s} failed ({} consecutive failures)\n", .{ task_entry.id, new_failures });
-                    }
-
-                    // Clean up
-                    allocator.free(task_entry.id);
-                    allocator.free(task_entry.content);
-
-                    // Remove from running list
-                    _ = running.swapRemove(i);
-                    // Don't increment i, we swapped in a new element
-                } else {
-                    i += 1;
+            if (success) {
+                updateFailureCount(allocator, &consecutive_failures, task.id, 0);
+                tasks_completed += 1;
+                stdout.print("Task completed successfully\n\n", .{}) catch {};
+                logToFile(allocator, log_file, "Task {s} completed successfully\n", .{task.id});
+            } else {
+                const new_failures = (consecutive_failures.get(task.id) orelse 0) + 1;
+                updateFailureCount(allocator, &consecutive_failures, task.id, new_failures);
+                stdout.print("Task failed ({} consecutive failures)\n", .{new_failures}) catch {};
+                logToFile(allocator, log_file, "Task {s} failed ({} consecutive failures)\n", .{ task.id, new_failures });
+                if (new_failures >= 3) {
+                    stdout.print("Skipping task after 3 consecutive failures\n", .{}) catch {};
                 }
-            }
-
-            // If still have running tasks, sleep briefly before polling again
-            if (running.items.len > 0 and running.items.len >= parallel) {
-                std.Thread.sleep(100 * std.time.ns_per_ms); // 100ms poll interval
+                stdout.print("\n", .{}) catch {};
             }
         }
 
-        if (once and tasks_completed > 0) {
+        if (once) {
             stdout.print("Exiting after one task (--once flag set)\n", .{}) catch {};
             break;
         }
 
-        // Delay between spawning batches
-        if (!dry_run and delay > 0 and running.items.len == 0 and eligible.items.len == 0) {
-            stdout.print("Waiting {} seconds before checking for new tasks...\n\n", .{delay}) catch {};
+        if (!dry_run and delay > 0) {
+            stdout.print("Waiting {} seconds before next task...\n\n", .{delay}) catch {};
             std.Thread.sleep(delay * std.time.ns_per_s);
         }
     }
 
-    // Clean up any still-running tasks
-    for (running.items) |*task_entry| {
-        _ = task_entry.child.kill() catch {};
-        allocator.free(task_entry.id);
-        allocator.free(task_entry.content);
-    }
-
-    return tasks_completed;
+    stdout.print("RALPH loop completed. {} tasks processed.\n", .{tasks_completed}) catch {};
+    logToFile(allocator, log_file, "=== RALPH loop completed: {} tasks processed ===\n\n", .{tasks_completed});
 }
 
 const PendingTask = struct {
@@ -1106,20 +745,7 @@ fn createPrompt(allocator: std.mem.Allocator, executor: []const u8, exe_path: []
         \\2. Complete this ONE task only
         \\3. Verify your work (run tests, check build)
         \\4. Commit your changes with: git commit -m "<message>"
-        \\5. Output a COMPLETION PROMISE (see below)
-        \\6. Mark the task done: {2s} tasks done {0s}
-        \\
-        \\COMPLETION PROMISE (required before marking task done):
-        \\Before calling `{2s} tasks done`, you MUST output the following confirmation:
-        \\
-        \\COMPLETION PROMISE: I confirm that:
-        \\- Tests pass: [which tests ran, summary of results]
-        \\- Build succeeds: [build command used, confirmation of no errors]
-        \\- Changes committed: [commit hash, commit message]
-        \\- Only this task was modified: [list of files changed, confirm no scope creep]
-        \\-- I have not taken any shortcuts or skipped any verification steps.
-        \\
-        \\Do NOT mark the task done without outputting this promise first.
+        \\5. Mark the task done: {2s} tasks done {0s}
         \\
         \\Knowledge Persistence:
         \\If you discover important structural insights during this task, update {3s}:
@@ -1136,178 +762,25 @@ fn createPrompt(allocator: std.mem.Allocator, executor: []const u8, exe_path: []
     , .{ task_id, task_content, exe_path, docs_file });
 }
 
-/// Executes a single task with optional streaming JSON output.
-///
-/// When stream_json is true:
-/// - Enables --output-format stream-json for real-time visibility
-/// - Streams output directly to logs/<task-id>.json
-/// - Provides better debugging for parallel execution
-///
-/// When stream_json is false:
-/// - Uses legacy capture mode where output is buffered in memory
-/// - Output is written to log file only on failure
-fn executeTaskStreaming(allocator: std.mem.Allocator, executor: []const u8, model: ?[]const u8, agent_cmd: ?[]const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8, stream_json: bool) !bool {
-    const stderr_writer = std.fs.File.stderr().deprecatedWriter();
-    const stdout_writer = std.fs.File.stdout().deprecatedWriter();
+fn executeTask(allocator: std.mem.Allocator, executor: []const u8, model: ?[]const u8, agent_cmd: ?[]const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8) !bool {
+    const stderr = std.fs.File.stderr().deprecatedWriter();
 
     const prompt = try createPrompt(allocator, executor, exe_path, task_id, task_content);
     defer allocator.free(prompt);
 
     // Use headless mode (interactive=false) for autonomous task execution
-    var runner_args = try buildExecutorArgs(allocator, executor, model, agent_cmd, prompt, false, stream_json);
+    var runner_args = try buildExecutorArgs(allocator, executor, model, agent_cmd, prompt, false);
     defer runner_args.deinit(allocator);
 
-    if (stream_json) {
-        // Streaming mode: redirect stdout to a JSON log file for real-time visibility
-        // Ensure logs directory exists
-        std.fs.cwd().makeDir("logs") catch |err| {
-            if (err != error.PathAlreadyExists) return err;
-        };
+    var child = std.process.Child.init(runner_args.items, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
 
-        // Create task-specific JSON log file path
-        const log_filename = try std.fmt.allocPrint(allocator, "logs/{s}.json", .{task_id});
-        defer allocator.free(log_filename);
-
-        stdout_writer.print("Streaming to: {s}\n", .{log_filename}) catch {};
-
-        // Build shell command with redirection to log file
-        var cmd_builder = std.ArrayList(u8){};
-        defer cmd_builder.deinit(allocator);
-        for (runner_args.items, 0..) |arg, idx| {
-            if (idx > 0) cmd_builder.append(allocator, ' ') catch continue;
-            cmd_builder.append(allocator, '\'') catch continue;
-            for (arg) |char| {
-                if (char == '\'') {
-                    cmd_builder.appendSlice(allocator, "'\\''") catch continue;
-                } else {
-                    cmd_builder.append(allocator, char) catch continue;
-                }
-            }
-            cmd_builder.append(allocator, '\'') catch continue;
-        }
-        cmd_builder.appendSlice(allocator, " > ") catch {};
-        cmd_builder.appendSlice(allocator, log_filename) catch {};
-
-        const shell_cmd = cmd_builder.items;
-
-        // Spawn through shell to handle redirection
-        var child = std.process.Child.init(&.{ "/bin/sh", "-c", shell_cmd }, allocator);
-        child.stdout_behavior = .Inherit;
-        child.stderr_behavior = .Inherit;
-
-        const term = child.spawnAndWait() catch |err| {
-            stderr_writer.print("Error executing runner: {s}\n", .{@errorName(err)}) catch {};
-            return false;
-        };
-
-        return term == .Exited and term.Exited == 0;
-    } else {
-        // Legacy capture mode: buffer output in memory
-        const result = std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = runner_args.items,
-        }) catch |err| {
-            stderr_writer.print("Error executing runner: {s}\n", .{@errorName(err)}) catch {};
-            logTaskOutput(allocator, task_id, null, null, err) catch {};
-            return false;
-        };
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
-
-        const success = result.term == .Exited and result.term.Exited == 0;
-
-        if (!success) {
-            logTaskOutput(allocator, task_id, result.stdout, result.stderr, null) catch {};
-
-            const exit_info = switch (result.term) {
-                .Exited => |code| blk: {
-                    var buf: [32]u8 = undefined;
-                    const s = std.fmt.bufPrint(&buf, "exit code {}", .{code}) catch "exit code ?";
-                    break :blk s;
-                },
-                .Signal => |sig| blk: {
-                    var buf: [32]u8 = undefined;
-                    const s = std.fmt.bufPrint(&buf, "signal {}", .{sig}) catch "signal ?";
-                    break :blk s;
-                },
-                .Stopped => |sig| blk: {
-                    var buf: [32]u8 = undefined;
-                    const s = std.fmt.bufPrint(&buf, "stopped {}", .{sig}) catch "stopped ?";
-                    break :blk s;
-                },
-                .Unknown => |val| blk: {
-                    var buf: [32]u8 = undefined;
-                    const s = std.fmt.bufPrint(&buf, "unknown {}", .{val}) catch "unknown ?";
-                    break :blk s;
-                },
-            };
-            stdout_writer.print("Process terminated: {s}\n", .{exit_info}) catch {};
-            stdout_writer.print("Output logged to: logs/{s}.log\n", .{task_id}) catch {};
-        }
-
-        return success;
-    }
-}
-
-/// Logs task output to a task-specific log file for debugging.
-///
-/// Creates logs/<task-id>.log with stdout, stderr, and error information.
-/// This enables post-mortem analysis of crashed or failed agent runs.
-fn logTaskOutput(allocator: std.mem.Allocator, task_id: []const u8, stdout_output: ?[]const u8, stderr_output: ?[]const u8, spawn_err: ?anyerror) !void {
-    // Ensure logs directory exists
-    std.fs.cwd().makeDir("logs") catch |err| {
-        if (err != error.PathAlreadyExists) return err;
+    const term = child.spawnAndWait() catch |err| {
+        stderr.print("Error executing runner: {s}\n", .{@errorName(err)}) catch {};
+        return false;
     };
 
-    // Create task-specific log file
-    const log_filename = std.fmt.allocPrint(allocator, "logs/{s}.log", .{task_id}) catch return;
-    defer allocator.free(log_filename);
-
-    var log_file = std.fs.cwd().createFile(log_filename, .{}) catch return;
-    defer log_file.close();
-
-    // Write timestamp header
-    const timestamp = std.time.timestamp();
-    const header = std.fmt.allocPrint(allocator, "=== Task {s} failed at {d} ===\n\n", .{ task_id, timestamp }) catch return;
-    defer allocator.free(header);
-    log_file.writeAll(header) catch return;
-
-    // Write spawn error if any
-    if (spawn_err) |err| {
-        const err_msg = std.fmt.allocPrint(allocator, "Spawn error: {s}\n\n", .{@errorName(err)}) catch return;
-        defer allocator.free(err_msg);
-        log_file.writeAll(err_msg) catch return;
-    }
-
-    // Write stdout if captured
-    if (stdout_output) |out| {
-        if (out.len > 0) {
-            const stdout_header = std.fmt.allocPrint(allocator, "=== STDOUT ({d} bytes) ===\n", .{out.len}) catch return;
-            defer allocator.free(stdout_header);
-            log_file.writeAll(stdout_header) catch return;
-            log_file.writeAll(out) catch return;
-            if (out[out.len - 1] != '\n') {
-                log_file.writeAll("\n") catch return;
-            }
-            log_file.writeAll("\n") catch return;
-        } else {
-            log_file.writeAll("=== STDOUT (empty) ===\n\n") catch return;
-        }
-    }
-
-    // Write stderr if captured
-    if (stderr_output) |err_out| {
-        if (err_out.len > 0) {
-            const stderr_header = std.fmt.allocPrint(allocator, "=== STDERR ({d} bytes) ===\n", .{err_out.len}) catch return;
-            defer allocator.free(stderr_header);
-            log_file.writeAll(stderr_header) catch return;
-            log_file.writeAll(err_out) catch return;
-            if (err_out[err_out.len - 1] != '\n') {
-                log_file.writeAll("\n") catch return;
-            }
-            log_file.writeAll("\n") catch return;
-        } else {
-            log_file.writeAll("=== STDERR (empty) ===\n\n") catch return;
-        }
-    }
+    return term == .Exited and term.Exited == 0;
 }
