@@ -403,14 +403,7 @@ describe("git edit edge cases", () => {
 });
 
 describe("git edit - conflict handling", () => {
-  // NOTE: Some conflict handling tests are skipped due to a segfault bug in
-  // the current implementation (edit.zig:494 - git_index_read_tree with null).
-  // These tests document the expected behavior for when the bug is fixed.
-
-  test.skip("reports conflict with clear message when cherry-pick fails", () => {
-    // SKIPPED: Current implementation crashes with segfault on conflict
-    // Expected behavior: Should report conflict with clear resolution instructions
-
+  test("reports conflict with clear message when cherry-pick fails", () => {
     // Create a repo with commits that modify the same file
     // A: initial (README.md = "# Test")
     // B: modifies README.md to "# Test B"
@@ -441,10 +434,7 @@ describe("git edit - conflict handling", () => {
     expect(result).toContain("git edit --abort");
   });
 
-  test.skip("--status shows conflict state during conflict", () => {
-    // SKIPPED: Current implementation crashes with segfault on conflict
-    // Expected behavior: --status should show "conflict" state
-
+  test("--status shows conflict state during conflict", () => {
     // Create commits that will conflict
     writeFileSync(resolve(REPO_DIR, "README.md"), "# Test B\n");
     git(["add", "."], { cwd: REPO_DIR });
@@ -468,10 +458,7 @@ describe("git edit - conflict handling", () => {
     expect(result).toContain("conflict");
   });
 
-  test.skip("--continue resumes after resolving conflict", () => {
-    // SKIPPED: Current implementation crashes with segfault on conflict
-    // Expected behavior: --continue should resume cherry-picking after conflict resolution
-
+  test("--continue resumes after resolving conflict", () => {
     // Create commits that will conflict
     writeFileSync(resolve(REPO_DIR, "README.md"), "# Test B\n");
     git(["add", "."], { cwd: REPO_DIR });
@@ -510,10 +497,7 @@ describe("git edit - conflict handling", () => {
     expect(result).toContain("--back");
   });
 
-  test.skip("--abort works during conflict", () => {
-    // SKIPPED: Current implementation crashes with segfault on conflict
-    // Expected behavior: --abort should restore original state even during conflict
-
+  test("--abort works during conflict", () => {
     // Create commits that will conflict
     writeFileSync(resolve(REPO_DIR, "README.md"), "# Test B\n");
     git(["add", "."], { cwd: REPO_DIR });
@@ -548,10 +532,7 @@ describe("git edit - conflict handling", () => {
     expect(branch).toBe("main");
   });
 
-  test.skip("edit state is cleared after aborting during conflict", () => {
-    // SKIPPED: Current implementation crashes with segfault on conflict
-    // Expected behavior: State should be fully cleared after abort
-
+  test("edit state is cleared after aborting during conflict", () => {
     // Create commits that will conflict
     writeFileSync(resolve(REPO_DIR, "README.md"), "# Test B\n");
     git(["add", "."], { cwd: REPO_DIR });

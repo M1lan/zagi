@@ -490,13 +490,10 @@ pub fn completeEdit(repo: ?*c.git_repository, allocator: std.mem.Allocator) Erro
             }
             defer c.git_index_free(repo_index);
 
-            // Copy cherry-pick index entries to repo index
-            if (c.git_index_read_tree(repo_index, null) == 0) {
-                // Clear and copy
-                _ = c.git_index_clear(repo_index);
-            }
+            // Clear repo index before copying from cherry-pick index
+            _ = c.git_index_clear(repo_index);
 
-            // Write the cherry index to disk for conflict resolution
+            // Copy cherry-pick index entries to repo index for conflict resolution
             const entry_count = c.git_index_entrycount(cherry_index);
             for (0..entry_count) |idx| {
                 const entry = c.git_index_get_byindex(cherry_index, idx);
