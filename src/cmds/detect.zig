@@ -77,11 +77,15 @@ pub fn readCurrentSession(allocator: std.mem.Allocator, agent: Agent, cwd: []con
 fn readClaudeCodeSession(allocator: std.mem.Allocator, cwd: []const u8) ?Session {
     const home = std.posix.getenv("HOME") orelse return null;
 
-    // Convert cwd to project hash (replace / with -)
+    // Resolve to main repo path (handles worktrees)
+    const project_path = resolveMainRepoPath(allocator, cwd) orelse return null;
+    defer allocator.free(project_path);
+
+    // Convert to project hash (replace / with -)
     // e.g., /Users/matt/Documents/Github/zagi -> -Users-matt-Documents-Github-zagi
     var project_hash_buf: [512]u8 = undefined;
     var hash_len: usize = 0;
-    for (cwd) |char| {
+    for (project_path) |char| {
         if (hash_len >= project_hash_buf.len) break;
         project_hash_buf[hash_len] = if (char == '/') '-' else char;
         hash_len += 1;
@@ -280,6 +284,45 @@ pub fn readSessionEntriesAfter(
     };
 }
 
+/// Resolve the main repository path (handles worktrees)
+/// For worktrees, returns the main repo path instead of the worktree path
+fn resolveMainRepoPath(allocator: std.mem.Allocator, cwd: []const u8) ?[]const u8 {
+    // Check if .git is a file (worktree) or directory (main repo)
+    const git_path = std.fmt.allocPrint(allocator, "{s}/.git", .{cwd}) catch return null;
+    defer allocator.free(git_path);
+
+    const stat = std.fs.cwd().statFile(git_path) catch {
+        // No .git found, return cwd as-is
+        return allocator.dupe(u8, cwd) catch null;
+    };
+
+    if (stat.kind == .file) {
+        // Worktree: .git is a file containing "gitdir: /path/to/.git/worktrees/name"
+        const git_file = std.fs.cwd().openFile(git_path, .{}) catch return null;
+        defer git_file.close();
+
+        var buf: [1024]u8 = undefined;
+        const bytes_read = git_file.readAll(&buf) catch return null;
+        const content = std.mem.trim(u8, buf[0..bytes_read], " \t\r\n");
+
+        // Parse "gitdir: /path/to/.git/worktrees/name"
+        if (std.mem.startsWith(u8, content, "gitdir: ")) {
+            const gitdir = content[8..];
+            // Find the main .git directory (remove /worktrees/name suffix)
+            if (std.mem.indexOf(u8, gitdir, "/worktrees/")) |idx| {
+                const main_git_dir = gitdir[0..idx];
+                // Remove /.git suffix to get main repo path
+                if (std.mem.endsWith(u8, main_git_dir, "/.git")) {
+                    return allocator.dupe(u8, main_git_dir[0 .. main_git_dir.len - 5]) catch null;
+                }
+            }
+        }
+    }
+
+    // Regular repo or couldn't parse worktree, return cwd
+    return allocator.dupe(u8, cwd) catch null;
+}
+
 /// Read Claude Code session entries after a checkpoint
 fn readClaudeEntriesAfter(
     allocator: std.mem.Allocator,
@@ -288,10 +331,14 @@ fn readClaudeEntriesAfter(
 ) ?SessionEntriesResult {
     const home = std.posix.getenv("HOME") orelse return null;
 
-    // Convert cwd to project hash
+    // Resolve to main repo path (handles worktrees)
+    const project_path = resolveMainRepoPath(allocator, cwd) orelse return null;
+    defer allocator.free(project_path);
+
+    // Convert to project hash
     var project_hash_buf: [512]u8 = undefined;
     var hash_len: usize = 0;
-    for (cwd) |char| {
+    for (project_path) |char| {
         if (hash_len >= project_hash_buf.len) break;
         project_hash_buf[hash_len] = if (char == '/') '-' else char;
         hash_len += 1;
@@ -340,7 +387,7 @@ fn readClaudeEntriesAfter(
     defer allocator.free(content);
 
     // Parse JSONL lines into entries
-    var entries = std.array_list.ArrayListAligned(SessionEntry, null).init(allocator);
+    var entries = std.array_list.AlignedManaged(SessionEntry, null).init(allocator);
     var found_checkpoint = after_uuid == null; // If no checkpoint, include all
     var last_uuid: ?[]const u8 = null;
 
@@ -506,7 +553,7 @@ pub fn formatSessionMarkdown(
         return try allocator.dupe(u8, "_No new session activity_");
     }
 
-    var result = std.array_list.ArrayListAligned(u8, null).init(allocator);
+    var result = std.array_list.AlignedManaged(u8, null).init(allocator);
     errdefer result.deinit();
 
     // Get time range from first and last entries
@@ -546,7 +593,7 @@ pub fn formatSessionMarkdown(
     try result.appendSlice(")</summary>\n\n");
 
     // Write each entry
-    var current_tools = std.array_list.ArrayListAligned([]const u8, null).init(allocator);
+    var current_tools = std.array_list.AlignedManaged([]const u8, null).init(allocator);
     defer current_tools.deinit();
 
     for (entries) |entry| {
