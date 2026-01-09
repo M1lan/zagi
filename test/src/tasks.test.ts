@@ -227,19 +227,20 @@ describe("zagi tasks done", () => {
 });
 
 describe("zagi tasks edit", () => {
-  test("is blocked in agent mode", () => {
+  test("appends in agent mode (append-only)", () => {
     zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
 
-    const result = zagi(["tasks", "edit", "task-001", "Updated content"], {
+    const result = zagi(["tasks", "edit", "task-001", "Additional notes"], {
       cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude-code" }
+      env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("error: edit command blocked");
-    expect(result).toContain("ZAGI_AGENT is set");
+    // In agent mode, edit appends to task instead of replacing
+    expect(result).toContain("appended: task-001");
+    expect(result).toContain("Additional notes");
   });
 
-  test("succeeds when not in agent mode", () => {
+  test("replaces when not in agent mode", () => {
     zagi(["tasks", "add", "Test task"], { cwd: REPO_DIR });
 
     const result = zagi(["tasks", "edit", "task-001", "Updated content"], { cwd: REPO_DIR });
@@ -255,7 +256,7 @@ describe("zagi tasks delete", () => {
 
     const result = zagi(["tasks", "delete", "task-001"], {
       cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude-code" }
+      env: { ZAGI_AGENT: "claude" }
     });
 
     expect(result).toContain("error: delete command blocked");
@@ -348,7 +349,7 @@ describe("zagi agent", () => {
     const result = zagi(["agent", "plan", "--help"], { cwd: REPO_DIR });
 
     expect(result).toContain("usage: git agent plan");
-    expect(result).toContain("<description>");
+    expect(result).toContain("[description]"); // Optional, hence brackets
     expect(result).toContain("--dry-run");
   });
 
@@ -358,18 +359,20 @@ describe("zagi agent", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("Planning Session (dry-run)");
-    expect(result).toContain("Goal: Add user auth");
+    expect(result).toContain("Interactive Planning Session (dry-run)");
+    expect(result).toContain("Initial context: Add user auth");
     expect(result).toContain("Would execute:");
-    expect(result).toContain("claude -p");
+    expect(result).toContain("claude"); // No -p flag for interactive mode
     expect(result).toContain("Prompt Preview");
-    expect(result).toContain("PROJECT GOAL: Add user auth");
+    expect(result).toContain("INITIAL CONTEXT: Add user auth");
   });
 
-  test("agent plan requires description", () => {
-    const result = zagi(["agent", "plan"], { cwd: REPO_DIR });
+  test("agent plan without description starts interactive session", () => {
+    // agent plan without description starts interactive mode (asks user what to build)
+    const result = zagi(["agent", "plan", "--dry-run"], { cwd: REPO_DIR });
 
-    expect(result).toContain("error: description required");
+    expect(result).toContain("Interactive Planning Session");
+    expect(result).toContain("Initial context: (none - will ask user)");
   });
 
   test("agent unknown subcommand shows error", () => {
@@ -392,17 +395,17 @@ describe("zagi agent plan --dry-run", () => {
     });
 
     // Verify all prompt sections are present
-    expect(result).toContain("=== Planning Session (dry-run) ===");
-    expect(result).toContain("Goal: Build a REST API");
+    expect(result).toContain("=== Interactive Planning Session (dry-run) ===");
+    expect(result).toContain("Initial context: Build a REST API");
     expect(result).toContain("Would execute:");
     expect(result).toContain("--- Prompt Preview ---");
-    expect(result).toContain("You are a planning agent");
-    expect(result).toContain("PROJECT GOAL: Build a REST API");
-    expect(result).toContain("INSTRUCTIONS:");
+    expect(result).toContain("You are an interactive planning agent");
+    expect(result).toContain("INITIAL CONTEXT: Build a REST API");
+    expect(result).toContain("PHASE 1: EXPLORE CODEBASE");
     expect(result).toContain("Read AGENTS.md");
-    expect(result).toContain("CREATING TASKS:");
+    expect(result).toContain("PHASE 4: CREATE TASKS");
     expect(result).toContain("tasks add");
-    expect(result).toContain("RULES:");
+    expect(result).toContain("=== RULES ===");
     expect(result).toContain("NEVER git push");
   });
 
@@ -423,8 +426,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain('Goal: Add "login" button');
-    expect(result).toContain('PROJECT GOAL: Add "login" button');
+    expect(result).toContain('Initial context: Add "login" button');
+    expect(result).toContain('INITIAL CONTEXT: Add "login" button');
   });
 
   test("handles goal with single quotes", () => {
@@ -433,8 +436,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("Goal: Add 'logout' feature");
-    expect(result).toContain("PROJECT GOAL: Add 'logout' feature");
+    expect(result).toContain("Initial context: Add 'logout' feature");
+    expect(result).toContain("INITIAL CONTEXT: Add 'logout' feature");
   });
 
   test("handles goal with backticks", () => {
@@ -443,8 +446,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("Goal: Add `code` formatting");
-    expect(result).toContain("PROJECT GOAL: Add `code` formatting");
+    expect(result).toContain("Initial context: Add `code` formatting");
+    expect(result).toContain("INITIAL CONTEXT: Add `code` formatting");
   });
 
   test("handles goal with shell special characters", () => {
@@ -453,8 +456,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("Goal: Fix $PATH & ENV vars");
-    expect(result).toContain("PROJECT GOAL: Fix $PATH & ENV vars");
+    expect(result).toContain("Initial context: Fix $PATH & ENV vars");
+    expect(result).toContain("INITIAL CONTEXT: Fix $PATH & ENV vars");
   });
 
   test("handles goal with angle brackets", () => {
@@ -463,8 +466,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("Goal: Add <input> validation");
-    expect(result).toContain("PROJECT GOAL: Add <input> validation");
+    expect(result).toContain("Initial context: Add <input> validation");
+    expect(result).toContain("INITIAL CONTEXT: Add <input> validation");
   });
 
   test("handles goal with parentheses and brackets", () => {
@@ -473,8 +476,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("Goal: Refactor function(args) and array[0]");
-    expect(result).toContain("PROJECT GOAL: Refactor function(args) and array[0]");
+    expect(result).toContain("Initial context: Refactor function(args) and array[0]");
+    expect(result).toContain("INITIAL CONTEXT: Refactor function(args) and array[0]");
   });
 
   test("handles goal with unicode characters", () => {
@@ -483,8 +486,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("Goal: Add emoji support");
-    expect(result).toContain("PROJECT GOAL: Add emoji support");
+    expect(result).toContain("Initial context: Add emoji support");
+    expect(result).toContain("INITIAL CONTEXT: Add emoji support");
   });
 
   test("handles goal with newline in content", () => {
@@ -495,8 +498,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain(`Goal: ${goal}`);
-    expect(result).toContain(`PROJECT GOAL: ${goal}`);
+    expect(result).toContain(`Initial context: ${goal}`);
+    expect(result).toContain(`INITIAL CONTEXT: ${goal}`);
   });
 
   test("handles long goal description", () => {
@@ -506,8 +509,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain(`Goal: ${longGoal}`);
-    expect(result).toContain(`PROJECT GOAL: ${longGoal}`);
+    expect(result).toContain(`Initial context: ${longGoal}`);
+    expect(result).toContain(`INITIAL CONTEXT: ${longGoal}`);
   });
 
   test("handles goal with mixed special characters", () => {
@@ -516,8 +519,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("Goal: Add 'auth' with <JWT> & \"refresh\" tokens");
-    expect(result).toContain("PROJECT GOAL: Add 'auth' with <JWT> & \"refresh\" tokens");
+    expect(result).toContain("Initial context: Add 'auth' with <JWT> & \"refresh\" tokens");
+    expect(result).toContain("INITIAL CONTEXT: Add 'auth' with <JWT> & \"refresh\" tokens");
   });
 
   test("shows opencode executor when ZAGI_AGENT=opencode", () => {
@@ -527,7 +530,7 @@ describe("zagi agent plan --dry-run", () => {
     });
 
     expect(result).toContain("Would execute:");
-    expect(result).toContain("opencode run");
+    expect(result).toContain("opencode"); // No "run" subcommand for interactive mode
   });
 
   test("shows custom executor when ZAGI_AGENT_CMD is set", () => {
@@ -546,7 +549,7 @@ describe("zagi agent plan --dry-run", () => {
     });
 
     expect(result).toContain("Would execute:");
-    expect(result).toContain("claude -p");
+    expect(result).toContain("claude"); // No -p flag for interactive mode
   });
 
   test("goal with only whitespace shows error", () => {
@@ -557,7 +560,7 @@ describe("zagi agent plan --dry-run", () => {
 
     // Whitespace-only is still valid input from the shell perspective
     // The command treats it as valid content
-    expect(result).toContain("Goal:");
+    expect(result).toContain("Initial context:");
   });
 
   test("--dry-run flag position after goal works", () => {
@@ -566,8 +569,8 @@ describe("zagi agent plan --dry-run", () => {
       env: { ZAGI_AGENT: "claude" }
     });
 
-    expect(result).toContain("Planning Session (dry-run)");
-    expect(result).toContain("Goal: Build feature");
+    expect(result).toContain("Interactive Planning Session (dry-run)");
+    expect(result).toContain("Initial context: Build feature");
   });
 });
 

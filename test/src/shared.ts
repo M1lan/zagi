@@ -25,6 +25,9 @@ export function zagi(args: string[], options: ZagiOptions = {}): string {
   if (!("ZAGI_AGENT" in envOverrides)) {
     delete env.ZAGI_AGENT;
   }
+  if (!("ZAGI_AGENT_CMD" in envOverrides)) {
+    delete env.ZAGI_AGENT_CMD;
+  }
   if (!("ZAGI_STRIP_COAUTHORS" in envOverrides)) {
     delete env.ZAGI_STRIP_COAUTHORS;
   }
