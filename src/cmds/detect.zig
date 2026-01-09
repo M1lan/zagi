@@ -279,7 +279,7 @@ pub fn readSessionEntriesAfter(
 ) ?SessionEntriesResult {
     return switch (agent) {
         .claude => readClaudeEntriesAfter(allocator, cwd, after_uuid),
-        // TODO: .opencode => readOpenCodeEntriesAfter(allocator, after_uuid),
+        .opencode => readOpenCodeEntriesAfter(allocator, cwd, after_uuid),
         else => null,
     };
 }
@@ -453,6 +453,348 @@ fn readClaudeEntriesAfter(
         .last_uuid = last_uuid,
         .session_path = session_path,
     };
+}
+
+/// Read OpenCode session entries after a checkpoint
+/// OpenCode stores data in:
+///   - ~/.local/share/opencode/storage/project/{project_id}.json -> contains worktree path
+///   - ~/.local/share/opencode/storage/session/{project_id}/{session_id}.json -> session metadata with directory
+///   - ~/.local/share/opencode/storage/message/{session_id}/msg_*.json -> message metadata
+///   - ~/.local/share/opencode/storage/part/{message_id}/prt_*.json -> message content/parts
+fn readOpenCodeEntriesAfter(
+    allocator: std.mem.Allocator,
+    cwd: []const u8,
+    after_uuid: ?[]const u8,
+) ?SessionEntriesResult {
+    const home = std.posix.getenv("HOME") orelse return null;
+
+    const base_dir = std.fmt.allocPrint(allocator, "{s}/.local/share/opencode/storage", .{home}) catch return null;
+    defer allocator.free(base_dir);
+
+    // Find the project ID and most recent session for this cwd
+    const session_info = findOpenCodeSession(allocator, base_dir, cwd) orelse return null;
+    defer allocator.free(session_info.session_id);
+
+    // Build message directory path
+    const message_dir = std.fmt.allocPrint(allocator, "{s}/message/{s}", .{ base_dir, session_info.session_id }) catch return null;
+    defer allocator.free(message_dir);
+
+    // Build session path for return value (used as checkpoint reference)
+    const session_path = std.fmt.allocPrint(allocator, "{s}/session/{s}", .{ base_dir, session_info.session_id }) catch return null;
+
+    // Read all messages and parts
+    var entries = std.array_list.AlignedManaged(SessionEntry, null).init(allocator);
+    var found_checkpoint = after_uuid == null;
+    var last_uuid: ?[]const u8 = null;
+
+    // Open and iterate message directory
+    var dir = std.fs.cwd().openDir(message_dir, .{ .iterate = true }) catch {
+        allocator.free(session_path);
+        return null;
+    };
+    defer dir.close();
+
+    // Collect message files and sort by name (which contains timestamp)
+    var msg_files = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+    defer {
+        for (msg_files.items) |f| allocator.free(f);
+        msg_files.deinit();
+    }
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+        if (!std.mem.startsWith(u8, entry.name, "msg_")) continue;
+        msg_files.append(allocator.dupe(u8, entry.name) catch continue) catch continue;
+    }
+
+    // Sort messages by filename (IDs are time-ordered)
+    std.mem.sort([]const u8, msg_files.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    // Process each message
+    for (msg_files.items) |msg_filename| {
+        const msg_content = dir.readFileAlloc(allocator, msg_filename, 100 * 1024) catch continue;
+        defer allocator.free(msg_content);
+
+        const entry = parseOpenCodeMessage(allocator, base_dir, msg_content) catch continue;
+
+        // Check if we've passed the checkpoint
+        if (!found_checkpoint) {
+            if (after_uuid) |checkpoint| {
+                if (std.mem.eql(u8, entry.uuid, checkpoint)) {
+                    found_checkpoint = true;
+                }
+            }
+            // Free entry since we're skipping it
+            allocator.free(entry.uuid);
+            allocator.free(entry.timestamp);
+            allocator.free(entry.entry_type);
+            if (entry.role) |r| allocator.free(r);
+            if (entry.content) |cont| allocator.free(cont);
+            if (entry.tool_name) |t| allocator.free(t);
+            continue;
+        }
+
+        // Track last UUID for checkpoint
+        if (last_uuid) |old| allocator.free(old);
+        last_uuid = allocator.dupe(u8, entry.uuid) catch null;
+
+        entries.append(entry) catch continue;
+    }
+
+    if (entries.items.len == 0) {
+        entries.deinit();
+        if (last_uuid) |u| allocator.free(u);
+        allocator.free(session_path);
+        return null;
+    }
+
+    return SessionEntriesResult{
+        .entries = entries.toOwnedSlice() catch {
+            entries.deinit();
+            if (last_uuid) |u| allocator.free(u);
+            allocator.free(session_path);
+            return null;
+        },
+        .last_uuid = last_uuid,
+        .session_path = session_path,
+    };
+}
+
+/// Information about an OpenCode session
+const OpenCodeSessionInfo = struct {
+    session_id: []const u8,
+};
+
+/// Find the most recent OpenCode session for a given working directory
+fn findOpenCodeSession(allocator: std.mem.Allocator, base_dir: []const u8, cwd: []const u8) ?OpenCodeSessionInfo {
+    // First, find all project directories and check their sessions for matching cwd
+    const session_base = std.fmt.allocPrint(allocator, "{s}/session", .{base_dir}) catch return null;
+    defer allocator.free(session_base);
+
+    var session_dir = std.fs.cwd().openDir(session_base, .{ .iterate = true }) catch return null;
+    defer session_dir.close();
+
+    var most_recent_session: ?[]const u8 = null;
+    var most_recent_time: i128 = 0;
+
+    // Iterate through all project directories
+    var dir_iter = session_dir.iterate();
+    while (dir_iter.next() catch null) |project_entry| {
+        if (project_entry.kind != .directory) continue;
+
+        // Open project session directory
+        var project_dir = session_dir.openDir(project_entry.name, .{ .iterate = true }) catch continue;
+        defer project_dir.close();
+
+        // Check each session file in this project
+        var sess_iter = project_dir.iterate();
+        while (sess_iter.next() catch null) |sess_entry| {
+            if (sess_entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, sess_entry.name, ".json")) continue;
+            if (!std.mem.startsWith(u8, sess_entry.name, "ses_")) continue;
+
+            // Read session file to check directory
+            const sess_content = project_dir.readFileAlloc(allocator, sess_entry.name, 10 * 1024) catch continue;
+            defer allocator.free(sess_content);
+
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, sess_content, .{}) catch continue;
+            defer parsed.deinit();
+
+            if (parsed.value != .object) continue;
+            const obj = parsed.value.object;
+
+            // Check if directory matches cwd
+            const dir_val = obj.get("directory") orelse continue;
+            if (dir_val != .string) continue;
+
+            if (!std.mem.eql(u8, dir_val.string, cwd)) continue;
+
+            // Get session ID
+            const id_val = obj.get("id") orelse continue;
+            if (id_val != .string) continue;
+
+            // Get update time for sorting
+            var update_time: i128 = 0;
+            if (obj.get("time")) |time_val| {
+                if (time_val == .object) {
+                    if (time_val.object.get("updated")) |updated| {
+                        switch (updated) {
+                            .integer => |i| update_time = i,
+                            .number_string => |s| update_time = std.fmt.parseInt(i128, s, 10) catch 0,
+                            else => {},
+                        }
+                    }
+                }
+            }
+
+            if (most_recent_session == null or update_time > most_recent_time) {
+                if (most_recent_session) |old| allocator.free(old);
+                most_recent_session = allocator.dupe(u8, id_val.string) catch continue;
+                most_recent_time = update_time;
+            }
+        }
+    }
+
+    if (most_recent_session) |session_id| {
+        return OpenCodeSessionInfo{
+            .session_id = session_id,
+        };
+    }
+
+    return null;
+}
+
+/// Parse an OpenCode message file and its parts into a SessionEntry
+fn parseOpenCodeMessage(allocator: std.mem.Allocator, base_dir: []const u8, msg_json: []const u8) !SessionEntry {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, msg_json, .{}) catch return error.ParseError;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.ParseError;
+    const obj = parsed.value.object;
+
+    // Extract message ID (required)
+    const id_val = obj.get("id") orelse return error.MissingId;
+    const msg_id = switch (id_val) {
+        .string => |s| s,
+        else => return error.MissingId,
+    };
+
+    // Extract role (required)
+    const role_val = obj.get("role") orelse return error.MissingRole;
+    const role = switch (role_val) {
+        .string => |s| s,
+        else => return error.MissingRole,
+    };
+
+    // Extract timestamp from time.created
+    var timestamp_buf: [32]u8 = undefined;
+    var timestamp: []const u8 = "1970-01-01T00:00:00.000Z";
+    if (obj.get("time")) |time_val| {
+        if (time_val == .object) {
+            if (time_val.object.get("created")) |created| {
+                switch (created) {
+                    .integer => |ms| {
+                        // Convert epoch ms to ISO format
+                        timestamp = formatEpochMs(ms, &timestamp_buf);
+                    },
+                    .number_string => |s| {
+                        const ms = std.fmt.parseInt(i64, s, 10) catch 0;
+                        timestamp = formatEpochMs(ms, &timestamp_buf);
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    // Determine entry type based on role
+    const entry_type = role;
+
+    // Read parts to get content and tool info
+    var content: ?[]const u8 = null;
+    var tool_name: ?[]const u8 = null;
+
+    const part_dir = std.fmt.allocPrint(allocator, "{s}/part/{s}", .{ base_dir, msg_id }) catch return error.ParseError;
+    defer allocator.free(part_dir);
+
+    var dir = std.fs.cwd().openDir(part_dir, .{ .iterate = true }) catch {
+        // No parts directory - return entry with just metadata
+        return SessionEntry{
+            .uuid = try allocator.dupe(u8, msg_id),
+            .timestamp = try allocator.dupe(u8, timestamp),
+            .entry_type = try allocator.dupe(u8, entry_type),
+            .role = try allocator.dupe(u8, role),
+            .content = null,
+            .tool_name = null,
+        };
+    };
+    defer dir.close();
+
+    // Read parts
+    var part_iter = dir.iterate();
+    while (part_iter.next() catch null) |part_entry| {
+        if (part_entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, part_entry.name, ".json")) continue;
+        if (!std.mem.startsWith(u8, part_entry.name, "prt_")) continue;
+
+        const part_content = dir.readFileAlloc(allocator, part_entry.name, 50 * 1024) catch continue;
+        defer allocator.free(part_content);
+
+        const part_parsed = std.json.parseFromSlice(std.json.Value, allocator, part_content, .{}) catch continue;
+        defer part_parsed.deinit();
+
+        if (part_parsed.value != .object) continue;
+        const part_obj = part_parsed.value.object;
+
+        // Get part type
+        const part_type_val = part_obj.get("type") orelse continue;
+        if (part_type_val != .string) continue;
+        const part_type = part_type_val.string;
+
+        if (std.mem.eql(u8, part_type, "text")) {
+            // Text content
+            if (part_obj.get("text")) |text_val| {
+                if (text_val == .string) {
+                    const text = text_val.string;
+                    const max_len: usize = 2000;
+                    if (text.len > max_len) {
+                        content = allocator.dupe(u8, text[0..max_len]) catch null;
+                    } else {
+                        content = allocator.dupe(u8, text) catch null;
+                    }
+                }
+            }
+        } else if (std.mem.eql(u8, part_type, "tool")) {
+            // Tool usage
+            if (part_obj.get("tool")) |tool_val| {
+                if (tool_val == .string) {
+                    tool_name = allocator.dupe(u8, tool_val.string) catch null;
+                }
+            }
+        }
+    }
+
+    return SessionEntry{
+        .uuid = try allocator.dupe(u8, msg_id),
+        .timestamp = try allocator.dupe(u8, timestamp),
+        .entry_type = try allocator.dupe(u8, entry_type),
+        .role = try allocator.dupe(u8, role),
+        .content = content,
+        .tool_name = tool_name,
+    };
+}
+
+/// Format epoch milliseconds to ISO 8601 timestamp string
+fn formatEpochMs(ms: i64, buf: *[32]u8) []const u8 {
+    // Convert milliseconds to seconds and remaining ms
+    const secs: u64 = @intCast(@divFloor(ms, 1000));
+    const rem_ms: u64 = @intCast(@mod(ms, 1000));
+
+    // Use Zig's epoch seconds conversion
+    const epoch = std.time.epoch.EpochSeconds{ .secs = secs };
+    const day_secs = epoch.getDaySeconds();
+    const year_day = epoch.getEpochDay().calculateYearDay();
+
+    const hour = day_secs.getHoursIntoDay();
+    const minute = day_secs.getMinutesIntoHour();
+    const second = day_secs.getSecondsIntoMinute();
+
+    const month_day = year_day.calculateMonthDay();
+    const year = year_day.year;
+    const month = month_day.month.numeric();
+    const day = month_day.day_index + 1;
+
+    const len = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+        year, month, day, hour, minute, second, rem_ms,
+    }) catch return "1970-01-01T00:00:00.000Z";
+
+    return len;
 }
 
 /// Parse a single JSONL line into a SessionEntry
@@ -1333,4 +1675,127 @@ test "formatSessionMarkdown handles content less than 2000 chars without ellipsi
     try testing.expect(std.mem.indexOf(u8, result, "Short content") != null);
     // Check that we don't have "Short content..." (with ellipsis)
     try testing.expect(std.mem.indexOf(u8, result, "Short content...") == null);
+}
+
+// ============================================================================
+// OpenCode parsing tests
+// ============================================================================
+
+test "formatEpochMs formats epoch milliseconds to ISO timestamp" {
+    var buf: [32]u8 = undefined;
+    // 2026-01-09T16:32:56.094Z = 1767976376094 ms
+    const result = formatEpochMs(1767976376094, &buf);
+    try testing.expectEqualStrings("2026-01-09T16:32:56.094Z", result);
+}
+
+test "formatEpochMs handles zero" {
+    var buf: [32]u8 = undefined;
+    const result = formatEpochMs(0, &buf);
+    try testing.expectEqualStrings("1970-01-01T00:00:00.000Z", result);
+}
+
+test "formatEpochMs handles midnight" {
+    var buf: [32]u8 = undefined;
+    // 2026-01-01T00:00:00.000Z = 1767225600000 ms
+    const result = formatEpochMs(1767225600000, &buf);
+    try testing.expectEqualStrings("2026-01-01T00:00:00.000Z", result);
+}
+
+test "formatEpochMs handles end of day" {
+    var buf: [32]u8 = undefined;
+    // 2026-01-01T23:59:59.999Z = 1767311999999 ms
+    const result = formatEpochMs(1767311999999, &buf);
+    try testing.expectEqualStrings("2026-01-01T23:59:59.999Z", result);
+}
+
+test "parseOpenCodeMessage parses user message" {
+    const allocator = testing.allocator;
+    const msg_json =
+        \\{"id":"msg_test123","sessionID":"ses_abc","role":"user","time":{"created":1767976376094}}
+    ;
+
+    // Use empty base_dir since we're not reading parts in this test
+    const entry = try parseOpenCodeMessage(allocator, "/nonexistent", msg_json);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("msg_test123", entry.uuid);
+    try testing.expectEqualStrings("2026-01-09T16:32:56.094Z", entry.timestamp);
+    try testing.expectEqualStrings("user", entry.entry_type);
+    try testing.expectEqualStrings("user", entry.role.?);
+    try testing.expect(entry.content == null);
+    try testing.expect(entry.tool_name == null);
+}
+
+test "parseOpenCodeMessage parses assistant message" {
+    const allocator = testing.allocator;
+    const msg_json =
+        \\{"id":"msg_assist456","sessionID":"ses_abc","role":"assistant","time":{"created":1767976380000}}
+    ;
+
+    const entry = try parseOpenCodeMessage(allocator, "/nonexistent", msg_json);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("msg_assist456", entry.uuid);
+    try testing.expectEqualStrings("assistant", entry.entry_type);
+    try testing.expectEqualStrings("assistant", entry.role.?);
+}
+
+test "parseOpenCodeMessage returns error on missing id" {
+    const allocator = testing.allocator;
+    const msg_json =
+        \\{"sessionID":"ses_abc","role":"user","time":{"created":1767976376094}}
+    ;
+
+    try testing.expectError(error.MissingId, parseOpenCodeMessage(allocator, "/nonexistent", msg_json));
+}
+
+test "parseOpenCodeMessage returns error on missing role" {
+    const allocator = testing.allocator;
+    const msg_json =
+        \\{"id":"msg_test123","sessionID":"ses_abc","time":{"created":1767976376094}}
+    ;
+
+    try testing.expectError(error.MissingRole, parseOpenCodeMessage(allocator, "/nonexistent", msg_json));
+}
+
+test "parseOpenCodeMessage returns error on invalid json" {
+    const allocator = testing.allocator;
+    const msg_json = "not valid json";
+
+    try testing.expectError(error.ParseError, parseOpenCodeMessage(allocator, "/nonexistent", msg_json));
+}
+
+test "parseOpenCodeMessage handles missing time field" {
+    const allocator = testing.allocator;
+    const msg_json =
+        \\{"id":"msg_notime","sessionID":"ses_abc","role":"user"}
+    ;
+
+    const entry = try parseOpenCodeMessage(allocator, "/nonexistent", msg_json);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("msg_notime", entry.uuid);
+    // Should use default timestamp when time is missing
+    try testing.expectEqualStrings("1970-01-01T00:00:00.000Z", entry.timestamp);
 }
