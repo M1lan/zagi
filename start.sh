@@ -1,52 +1,175 @@
 #!/bin/bash
-# RALPH loop - run Claude Code over tasks in plan.md
+# RALPH loop - run Claude over zagi tasks
+#
+# Usage: ./start.sh [options]
+#   Options:
+#     --delay <secs>    Delay between tasks (default: 2)
+#     --once            Run only one task then exit
+#     --dry-run         Show what would run without executing
+#     --help            Show this help
 
-MODEL="${MODEL:-claude-sonnet-4-20250514}"
+set -e
+
+# Defaults
 DELAY="${DELAY:-2}"
-PLAN="${PLAN:-plan.md}"
+ONCE=false
+DRY_RUN=false
+
+# Auto-detect git tasks command
+if [ -x "./zig-out/bin/zagi" ]; then
+  ZAGI="./zig-out/bin/zagi"
+else
+  echo "error: ./zig-out/bin/zagi not found. Build with 'zig build' first."
+  exit 1
+fi
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --delay)
+      DELAY="$2"
+      shift 2
+      ;;
+    --once)
+      ONCE=true
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --help|-h)
+      sed -n '2,10p' "$0" | sed 's/^# //' | sed 's/^#//'
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+# Check if we're in a git repo
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+  echo "error: not a git repository"
+  exit 1
+fi
 
 echo "RALPH loop starting..."
-echo "Plan: $PLAN"
-echo "Model: $MODEL"
+if [ "$DRY_RUN" = true ]; then
+  echo "(dry-run mode)"
+fi
+echo ""
+
+# Show current tasks
+$ZAGI tasks list 2>/dev/null || echo "No tasks found."
 echo ""
 
 while true; do
-  # Get first unchecked task from plan.md
-  TASK=$(grep -m1 '^\- \[ \]' "$PLAN" 2>/dev/null | sed 's/^- \[ \] //')
+  # Get all tasks as JSON and find first pending
+  TASKS_JSON=$($ZAGI tasks list --json 2>/dev/null || echo '{"tasks":[]}')
 
-  if [ -z "$TASK" ]; then
+  # Extract first pending task using basic parsing
+  # Look for pending tasks in the JSON
+  TASK_LINE=$(echo "$TASKS_JSON" | tr ',' '\n' | grep -A5 '"status":"pending"' | head -6)
+
+  if [ -z "$TASK_LINE" ]; then
     echo ""
     echo "=== All tasks complete! ==="
     exit 0
   fi
 
-  echo "=== Next task ==="
-  echo "$TASK"
+  # Extract task ID and content
+  TASK_ID=$(echo "$TASKS_JSON" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for t in data.get('tasks', []):
+    if t.get('status') == 'pending':
+        print(t['id'])
+        break
+" 2>/dev/null || echo "")
+
+  TASK_CONTENT=$(echo "$TASKS_JSON" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for t in data.get('tasks', []):
+    if t.get('status') == 'pending':
+        print(t['content'])
+        break
+" 2>/dev/null || echo "")
+
+  if [ -z "$TASK_ID" ]; then
+    echo ""
+    echo "=== All tasks complete! ==="
+    exit 0
+  fi
+
+  echo "=== Working on $TASK_ID ==="
+  echo "$TASK_CONTENT"
   echo ""
 
-  PROMPT="You are working through plan.md one task at a time.
+  # Build the prompt
+  PROMPT="You are working on: $TASK_ID
 
-Current task: $TASK
+Task: $TASK_CONTENT
 
 Instructions:
-1. Read AGENTS.md for project context and build instructions
-2. Complete this ONE task only
-3. Verify your work (run tests, check build)
-4. Commit your changes with: git commit -m \"<message>\" --prompt \"$TASK\"
-5. Mark the task done in plan.md by changing [ ] to [x]
-6. If you learn critical operational details (e.g. how to build), update AGENTS.md
+1. Read CONTEXT.md for mission context and current focus
+2. Read AGENTS.md for build instructions and conventions
+3. Complete this ONE task only
+4. Verify your work (run tests, check build)
+5. Commit your changes with: git commit -m \"<message>\"
+6. Output a COMPLETION PROMISE (see below)
+7. Mark the task done: $ZAGI tasks done $TASK_ID
+
+COMPLETION PROMISE (required before marking task done):
+Before calling \`$ZAGI tasks done\`, you MUST output the following confirmation:
+
+COMPLETION PROMISE: I confirm that:
+- Tests pass: [which tests ran, summary of results]
+- Build succeeds: [build command used, confirmation of no errors]
+- Changes committed: [commit hash, commit message]
+- Only this task was modified: [list of files changed, confirm no scope creep]
+-- I have not taken any shortcuts or skipped any verification steps.
+
+Do NOT mark the task done without outputting this promise first.
 
 Rules:
 - NEVER git push (only commit)
 - ONLY work on this one task
 - Exit when done so the next task can start"
 
-  # Run Claude Code in headless mode with permissions bypassed
-  claude --print --dangerously-skip-permissions --model "$MODEL" "$PROMPT"
+  if [ "$DRY_RUN" = true ]; then
+    echo "Would execute:"
+    echo "  claude -p \"<prompt>\""
+    echo ""
+    echo "Prompt preview:"
+    echo "$PROMPT" | head -10
+    echo "..."
+    echo ""
+  else
+    # Run Claude in headless mode with streaming JSON output
+    export ZAGI_AGENT=claude
+    TASK_LOG="logs/${TASK_ID}.json"
+    mkdir -p logs
+    echo "Streaming to: $TASK_LOG"
+
+    # Use CC_CMD if set, otherwise default to claude with skip-permissions
+    # Note: can't use 'cc' alias since shell aliases don't work in scripts
+    CC="${CC_CMD:-claude --dangerously-skip-permissions}"
+    $CC -p --verbose --output-format stream-json "$PROMPT" 2>&1 | tee "$TASK_LOG"
+  fi
 
   echo ""
   echo "=== Task iteration complete ==="
   echo ""
 
-  sleep "$DELAY"
+  if [ "$ONCE" = true ]; then
+    echo "Exiting after one task (--once flag)"
+    exit 0
+  fi
+
+  if [ "$DRY_RUN" = false ]; then
+    sleep "$DELAY"
+  fi
 done

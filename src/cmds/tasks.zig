@@ -3,6 +3,88 @@ const git = @import("git.zig");
 const c = git.c;
 const json = std.json;
 
+/// Escape a string for JSON output (escapes quotes, backslashes, newlines, etc.)
+fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var result = std.ArrayList(u8){};
+    errdefer result.deinit(allocator);
+
+    for (input) |char| {
+        switch (char) {
+            '"' => try result.appendSlice(allocator, "\\\""),
+            '\\' => try result.appendSlice(allocator, "\\\\"),
+            '\n' => try result.appendSlice(allocator, "\\n"),
+            '\r' => try result.appendSlice(allocator, "\\r"),
+            '\t' => try result.appendSlice(allocator, "\\t"),
+            else => {
+                if (char < 0x20) {
+                    // Control characters - output as \u00XX
+                    var buf: [6]u8 = undefined;
+                    const len = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{char}) catch unreachable;
+                    try result.appendSlice(allocator, len);
+                } else {
+                    try result.append(allocator, char);
+                }
+            },
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
+}
+
+/// Escape content for storage (newlines -> \n, pipes -> \p, backslashes -> \\)
+/// This allows content with embedded newlines and pipes to be stored in the line-based format.
+fn escapeContentForStorage(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var result = std.ArrayList(u8){};
+    errdefer result.deinit(allocator);
+
+    for (input) |char| {
+        switch (char) {
+            '\\' => try result.appendSlice(allocator, "\\\\"),
+            '\n' => try result.appendSlice(allocator, "\\n"),
+            '|' => try result.appendSlice(allocator, "\\p"),
+            else => try result.append(allocator, char),
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
+}
+
+/// Unescape content from storage (\\n -> newline, \\p -> pipe, \\\\ -> backslash)
+fn unescapeContentFromStorage(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var result = std.ArrayList(u8){};
+    errdefer result.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        if (i + 1 < input.len and input[i] == '\\') {
+            switch (input[i + 1]) {
+                '\\' => {
+                    try result.append(allocator, '\\');
+                    i += 2;
+                },
+                'n' => {
+                    try result.append(allocator, '\n');
+                    i += 2;
+                },
+                'p' => {
+                    try result.append(allocator, '|');
+                    i += 2;
+                },
+                else => {
+                    // Unknown escape, keep as-is
+                    try result.append(allocator, input[i]);
+                    i += 1;
+                },
+            }
+        } else {
+            try result.append(allocator, input[i]);
+            i += 1;
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
+}
+
 pub const help =
     \\usage: git tasks <command> [options]
     \\
@@ -12,27 +94,31 @@ pub const help =
     \\  add <content>           Add a new task
     \\  list                    List all tasks
     \\  show <id>               Show task details
-    \\  edit <id> <content>     Edit task content
-    \\  delete <id>             Delete a task
+    \\  edit <id> <content>     Edit task content (use --append to add notes)
+    \\  delete <id>             Delete a task (blocked in agent mode)
     \\  done <id>               Mark task as complete
-    \\  ready                   List tasks ready to work on (no blockers)
     \\  pr                      Export tasks as markdown for PR description
+    \\  import <file>           Import tasks from a plan file (markdown)
     \\
     \\Options:
-    \\  --after <id>           Add task dependency (use with 'add')
     \\  --json                 Output in JSON format
+    \\  --append               Append content instead of replacing (edit only)
     \\  -h, --help             Show this help message
+    \\
+    \\Agent mode (ZAGI_AGENT):
+    \\  When ZAGI_AGENT is set, 'edit' automatically appends instead of replacing.
+    \\  This prevents agents from accidentally overwriting task content.
     \\
     \\Examples:
     \\  git tasks add "Fix authentication bug"
-    \\  git tasks add "Add tests" --after task-001
     \\  git tasks list
     \\  git tasks show task-001
     \\  git tasks edit task-001 "Fix authentication and authorization bug"
+    \\  git tasks edit task-001 "Found root cause: Y" --append
     \\  git tasks delete task-001
     \\  git tasks done task-001
-    \\  git tasks ready
     \\  git tasks pr
+    \\  git tasks import plan.md
     \\
 ;
 
@@ -49,6 +135,9 @@ pub const Error = git.Error || error{
     JsonParseError,
     JsonWriteError,
     OutOfMemory,
+    FileNotFound,
+    FileReadError,
+    NoTasksFound,
 };
 
 /// Represents a single task
@@ -58,7 +147,6 @@ const Task = struct {
     status: []const u8 = "pending",
     created: i64,
     completed: ?i64 = null,
-    after: ?[]const u8 = null, // ID of task this depends on
 
     const Self = @This();
 
@@ -66,9 +154,6 @@ const Task = struct {
         allocator.free(self.id);
         allocator.free(self.content);
         allocator.free(self.status);
-        if (self.after) |after_id| {
-            allocator.free(after_id);
-        }
     }
 };
 
@@ -114,19 +199,20 @@ const TaskList = struct {
         const next_id_line = std.fmt.allocPrint(allocator, "next_id:{}", .{self.next_id}) catch return Error.OutOfMemory;
         lines.append(allocator, next_id_line) catch return Error.OutOfMemory;
 
-        // Task lines: id|content|status|created|completed|after
+        // Task lines: id|content|status|created|completed
+        // Content is escaped to handle embedded newlines and pipes
         for (self.tasks.items) |task| {
             const completed_str = if (task.completed) |comp_time| std.fmt.allocPrint(allocator, "{}", .{comp_time}) catch return Error.OutOfMemory else allocator.dupe(u8, "") catch return Error.OutOfMemory;
-            const after_str = if (task.after) |a| a else "";
+            defer if (task.completed != null) allocator.free(completed_str);
 
-            const task_line = std.fmt.allocPrint(allocator, "task:{s}|{s}|{s}|{}|{s}|{s}",
-                .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+            // Escape content for storage
+            const escaped_content = escapeContentForStorage(allocator, task.content) catch return Error.OutOfMemory;
+            defer allocator.free(escaped_content);
+
+            const task_line = std.fmt.allocPrint(allocator, "task:{s}|{s}|{s}|{}|{s}",
+                .{ task.id, escaped_content, task.status, task.created, completed_str }
             ) catch return Error.OutOfMemory;
             lines.append(allocator, task_line) catch return Error.OutOfMemory;
-
-            if (task.completed != null) {
-                allocator.free(completed_str);
-            }
         }
 
         // Join lines with newlines
@@ -174,10 +260,11 @@ const TaskList = struct {
                 const id = parts.next() orelse continue; // Skip malformed lines without ID
                 if (id.len == 0) continue; // Skip tasks with empty IDs
 
-                const content = parts.next() orelse continue; // Skip malformed lines without content
+                const escaped_content = parts.next() orelse continue; // Skip malformed lines without content
 
                 task.id = allocator.dupe(u8, id) catch return Error.AllocationError;
-                task.content = allocator.dupe(u8, content) catch {
+                // Unescape content from storage (handles embedded newlines and pipes)
+                task.content = unescapeContentFromStorage(allocator, escaped_content) catch {
                     allocator.free(task.id);
                     return Error.AllocationError;
                 };
@@ -212,11 +299,8 @@ const TaskList = struct {
                         task.completed = std.fmt.parseInt(i64, completed, 10) catch null;
                     }
                 }
-                if (parts.next()) |after| {
-                    if (after.len > 0) {
-                        task.after = allocator.dupe(u8, after) catch return Error.AllocationError;
-                    }
-                }
+                // Skip any remaining fields (legacy 'after' field for backwards compatibility)
+                _ = parts.next();
 
                 task_list.tasks.append(allocator, task) catch {
                     allocator.free(task.id);
@@ -422,10 +506,10 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
         try runDelete(allocator, args, repo);
     } else if (std.mem.eql(u8, subcommand, "done")) {
         try runDone(allocator, args, repo);
-    } else if (std.mem.eql(u8, subcommand, "ready")) {
-        try runReady(allocator, args, repo);
     } else if (std.mem.eql(u8, subcommand, "pr")) {
         try runPr(allocator, args, repo);
+    } else if (std.mem.eql(u8, subcommand, "import")) {
+        try runImport(allocator, args, repo);
     } else {
         stdout.print("error: unknown command '{s}'\n\n{s}", .{ subcommand, help }) catch {};
         return Error.InvalidCommand;
@@ -441,24 +525,16 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
         return Error.MissingTaskContent;
     }
 
-    // Parse arguments for content, --after flag, and --json flag
+    // Parse arguments for content and --json flag
     var content: ?[]const u8 = null;
-    var after_id: ?[]const u8 = null;
+    var content_allocated = false; // Track if content was allocated by us
     var use_json = false;
     var i: usize = 3; // Start after "git tasks add"
 
     while (i < args.len) {
         const arg = std.mem.sliceTo(args[i], 0);
 
-        if (std.mem.eql(u8, arg, "--after")) {
-            // Next argument should be the task ID
-            i += 1;
-            if (i >= args.len) {
-                stdout.print("error: --after requires a task ID\n", .{}) catch {};
-                return Error.InvalidTaskId;
-            }
-            after_id = std.mem.sliceTo(args[i], 0);
-        } else if (std.mem.eql(u8, arg, "--json")) {
+        if (std.mem.eql(u8, arg, "--json")) {
             use_json = true;
         } else if (content == null) {
             // First non-flag argument is the content
@@ -467,11 +543,19 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
             // Multiple content arguments - concatenate with spaces
             const existing = content.?;
             const combined = std.fmt.allocPrint(allocator, "{s} {s}", .{ existing, arg }) catch return Error.AllocationError;
-            // Note: we're not tracking these allocations, but they're short-lived
+            // Free previous allocation if we made one
+            if (content_allocated) {
+                allocator.free(@constCast(existing));
+            }
             content = combined;
+            content_allocated = true;
         }
         i += 1;
     }
+    // Clean up content allocation on early returns or at end of function
+    defer if (content_allocated) {
+        if (content) |content_ptr| allocator.free(@constCast(content_ptr));
+    };
 
     if (content == null or content.?.len == 0) {
         stdout.print("error: task content cannot be empty\n", .{}) catch {};
@@ -508,7 +592,6 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
         .content = task_content,
         .status = task_status,
         .created = now,
-        .after = if (after_id) |aid| allocator.dupe(u8, aid) catch return Error.AllocationError else null,
     };
 
     // Add task to list - after this, task_list owns the allocations
@@ -529,12 +612,9 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
     // Output confirmation
     if (use_json) {
         // Manually construct JSON output
-        const after_str = if (after_id) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
-        defer allocator.free(after_str);
-
         const json_output = try std.fmt.allocPrint(allocator,
-            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"pending\",\"created\":{},\"completed\":null,\"after\":{s}}}",
-            .{ task_id, content.?, now, after_str }
+            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"pending\",\"created\":{},\"completed\":null}}",
+            .{ task_id, content.?, now }
         );
         defer allocator.free(json_output);
 
@@ -572,7 +652,6 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
             status: []const u8,
             created: i64,
             completed: ?i64,
-            after: ?[]const u8,
         };
 
 
@@ -587,7 +666,6 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
                 .status = task.status,
                 .created = task.created,
                 .completed = task.completed,
-                .after = task.after,
             }) catch return Error.AllocationError;
         }
 
@@ -603,12 +681,13 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
             const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
             defer allocator.free(completed_str);
 
-            const after_str = if (task.after) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
-            defer allocator.free(after_str);
+            // Escape content for JSON (handles quotes, newlines, etc.)
+            const escaped_content = escapeJsonString(allocator, task.content) catch return Error.AllocationError;
+            defer allocator.free(escaped_content);
 
             const task_json = try std.fmt.allocPrint(allocator,
-                "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s},\"after\":{s}}}",
-                .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+                "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
+                .{ task.id, escaped_content, task.status, task.created, completed_str }
             );
             defer allocator.free(task_json);
 
@@ -644,15 +723,8 @@ fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
     // List all tasks with compact format
     for (task_list.tasks.items) |task| {
         const status_mark = if (std.mem.eql(u8, task.status, "completed")) "✓" else " ";
-
-        // Show dependency if present
-        if (task.after) |after_id| {
-            stdout.print("[{s}] {s} (after {s})\n  {s}\n",
-                .{ status_mark, task.id, after_id, task.content }) catch {};
-        } else {
-            stdout.print("[{s}] {s}\n  {s}\n",
-                .{ status_mark, task.id, task.content }) catch {};
-        }
+        stdout.print("[{s}] {s}\n  {s}\n",
+            .{ status_mark, task.id, task.content }) catch {};
     }
 }
 
@@ -731,12 +803,9 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
         const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
         defer allocator.free(completed_str);
 
-        const after_str = if (task.after) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
-        defer allocator.free(after_str);
-
         const json_output = try std.fmt.allocPrint(allocator,
-            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s},\"after\":{s}}}",
-            .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
+            .{ task.id, task.content, task.status, task.created, completed_str }
         );
         defer allocator.free(json_output);
 
@@ -763,10 +832,6 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 
     if (completed_time) |ct| {
         stdout.print("completed: {s}\n", .{ct}) catch {};
-    }
-
-    if (task.after) |after_id| {
-        stdout.print("depends on: {s}\n", .{after_id}) catch {};
     }
 }
 
@@ -826,8 +891,17 @@ fn runDone(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 }
 
 fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    _ = args; // No additional args needed for ready
     const stdout = std.fs.File.stdout().deprecatedWriter();
+
+    // Parse --json flag
+    var use_json = false;
+    for (args[3..]) |arg| {
+        const a = std.mem.sliceTo(arg, 0);
+        if (std.mem.eql(u8, a, "--json")) {
+            use_json = true;
+            break;
+        }
+    }
 
     // Load task list from git ref
     var task_list = loadTaskList(repo, allocator) catch |err| {
@@ -842,57 +916,53 @@ fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposito
         return;
     }
 
-    // Build a map of task ID -> completion status for dependency checking
-    var completed_tasks = std.HashMap([]const u8, bool, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
-    defer completed_tasks.deinit();
-
-    for (task_list.tasks.items) |task| {
-        const is_completed = std.mem.eql(u8, task.status, "completed");
-        completed_tasks.put(task.id, is_completed) catch return Error.AllocationError;
-    }
-
-    // Find tasks that are ready (pending and no unmet dependencies)
+    // Find pending tasks (all pending tasks are ready without dependencies)
     var ready_tasks = std.ArrayList(Task){};
     defer ready_tasks.deinit(allocator);
 
     for (task_list.tasks.items) |task| {
-        // Skip completed tasks
-        if (std.mem.eql(u8, task.status, "completed")) {
-            continue;
-        }
-
-        // Check if this task is ready
-        var is_ready = true;
-
-        // If task has a dependency, check if it's completed
-        if (task.after) |dependency_id| {
-            if (completed_tasks.get(dependency_id)) |is_dep_completed| {
-                if (!is_dep_completed) {
-                    is_ready = false;
-                }
-            } else {
-                // Dependency doesn't exist - this is an error state, but we'll treat it as not ready
-                is_ready = false;
-            }
-        }
-
-        if (is_ready) {
+        if (!std.mem.eql(u8, task.status, "completed")) {
             ready_tasks.append(allocator, task) catch return Error.AllocationError;
         }
     }
 
     // If no ready tasks, show empty state
     if (ready_tasks.items.len == 0) {
-        stdout.print("no ready tasks (all tasks are either completed or waiting on dependencies)\n", .{}) catch {};
+        if (use_json) {
+            stdout.print("[]\n", .{}) catch {};
+        } else {
+            stdout.print("no pending tasks\n", .{}) catch {};
+        }
         return;
     }
 
-    // Display ready task count
-    stdout.print("ready: {} task{s}\n\n", .{ ready_tasks.items.len, if (ready_tasks.items.len == 1) "" else "s" }) catch {};
+    if (use_json) {
+        // JSON output - array of tasks
+        stdout.print("[", .{}) catch {};
+        for (ready_tasks.items, 0..) |task, i| {
+            const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
+            defer allocator.free(completed_str);
 
-    // List ready tasks with compact format
-    for (ready_tasks.items) |task| {
-        stdout.print("[ ] {s}\n  {s}\n", .{ task.id, task.content }) catch {};
+            const json_output = try std.fmt.allocPrint(allocator,
+                "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
+                .{ task.id, task.content, task.status, task.created, completed_str }
+            );
+            defer allocator.free(json_output);
+
+            if (i > 0) {
+                stdout.print(",", .{}) catch {};
+            }
+            stdout.print("{s}", .{json_output}) catch {};
+        }
+        stdout.print("]\n", .{}) catch {};
+    } else {
+        // Display ready task count
+        stdout.print("ready: {} task{s}\n\n", .{ ready_tasks.items.len, if (ready_tasks.items.len == 1) "" else "s" }) catch {};
+
+        // List ready tasks with compact format
+        for (ready_tasks.items) |task| {
+            stdout.print("[ ] {s}\n  {s}\n", .{ task.id, task.content }) catch {};
+        }
     }
 }
 
@@ -913,22 +983,17 @@ fn runPr(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository)
         return;
     }
 
-    // Separate tasks by status and build dependency map
+    // Separate tasks by status
     var completed_tasks = std.ArrayList(Task){};
     var pending_tasks = std.ArrayList(Task){};
     defer completed_tasks.deinit(allocator);
     defer pending_tasks.deinit(allocator);
 
-    var completed_map = std.HashMap([]const u8, bool, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator);
-    defer completed_map.deinit();
-
     for (task_list.tasks.items) |task| {
         if (std.mem.eql(u8, task.status, "completed")) {
             completed_tasks.append(allocator, task) catch return Error.AllocationError;
-            completed_map.put(task.id, true) catch return Error.AllocationError;
         } else {
             pending_tasks.append(allocator, task) catch return Error.AllocationError;
-            completed_map.put(task.id, false) catch return Error.AllocationError;
         }
     }
 
@@ -939,94 +1004,49 @@ fn runPr(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository)
     if (completed_tasks.items.len > 0) {
         stdout.print("### Completed\n\n", .{}) catch {};
         for (completed_tasks.items) |task| {
-            if (task.after) |after_id| {
-                stdout.print("- [x] {s} (after {s})\n", .{ task.content, after_id }) catch {};
-            } else {
-                stdout.print("- [x] {s}\n", .{ task.content }) catch {};
-            }
+            stdout.print("- [x] {s}\n", .{task.content}) catch {};
         }
         stdout.print("\n", .{}) catch {};
     }
 
-    // Show pending tasks, grouped by ready vs blocked
+    // Show pending tasks
     if (pending_tasks.items.len > 0) {
-        var ready_tasks = std.ArrayList(Task){};
-        var blocked_tasks = std.ArrayList(Task){};
-        defer ready_tasks.deinit(allocator);
-        defer blocked_tasks.deinit(allocator);
-
+        stdout.print("### Pending\n\n", .{}) catch {};
         for (pending_tasks.items) |task| {
-            var is_ready = true;
-
-            // Check if this task is blocked by dependencies
-            if (task.after) |dependency_id| {
-                if (completed_map.get(dependency_id)) |is_dep_completed| {
-                    if (!is_dep_completed) {
-                        is_ready = false;
-                    }
-                } else {
-                    // Dependency doesn't exist - treat as blocked
-                    is_ready = false;
-                }
-            }
-
-            if (is_ready) {
-                ready_tasks.append(allocator, task) catch return Error.AllocationError;
-            } else {
-                blocked_tasks.append(allocator, task) catch return Error.AllocationError;
-            }
+            stdout.print("- [ ] {s}\n", .{task.content}) catch {};
         }
-
-        // Show ready tasks first
-        if (ready_tasks.items.len > 0) {
-            stdout.print("### Ready\n\n", .{}) catch {};
-            for (ready_tasks.items) |task| {
-                stdout.print("- [ ] {s}\n", .{ task.content }) catch {};
-            }
-            stdout.print("\n", .{}) catch {};
-        }
-
-        // Show blocked tasks
-        if (blocked_tasks.items.len > 0) {
-            stdout.print("### Blocked\n\n", .{}) catch {};
-            for (blocked_tasks.items) |task| {
-                if (task.after) |after_id| {
-                    stdout.print("- [ ] {s} (after {s})\n", .{ task.content, after_id }) catch {};
-                } else {
-                    stdout.print("- [ ] {s}\n", .{ task.content }) catch {};
-                }
-            }
-            stdout.print("\n", .{}) catch {};
-        }
+        stdout.print("\n", .{}) catch {};
     }
 }
 
 fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
 
-    // Check if we should block this operation in agent mode
+    // Check if we're in agent mode - agents can only append, not replace
     const guardrails = @import("../guardrails.zig");
-    if (guardrails.isAgentMode()) {
-        stdout.print("error: edit command blocked (ZAGI_AGENT is set)\n", .{}) catch {};
-        stdout.print("reason: modifying tasks could cause data loss\n", .{}) catch {};
-        return Error.InvalidCommand;
-    }
+    const is_agent_mode = guardrails.isAgentMode();
 
     // Need at least: tasks edit <id> <content>
     if (args.len < 5) {
-        stdout.print("error: missing task ID or content\n\nusage: git tasks edit <id> <content>\n", .{}) catch {};
+        stdout.print("error: missing task ID or content\n\nusage: git tasks edit <id> <content> [--append]\n", .{}) catch {};
         return Error.InvalidTaskId;
     }
 
     const task_id = std.mem.sliceTo(args[3], 0);
 
-    // Parse content arguments (everything from args[4] onwards)
+    // Parse content arguments and flags
     var content_parts = std.ArrayList([]const u8){};
     defer content_parts.deinit(allocator);
+    var use_json = false;
+    var append_flag = false;
 
     for (args[4..]) |arg| {
         const arg_str = std.mem.sliceTo(arg, 0);
-        if (!std.mem.eql(u8, arg_str, "--json")) { // Skip --json flag for content
+        if (std.mem.eql(u8, arg_str, "--json")) {
+            use_json = true;
+        } else if (std.mem.eql(u8, arg_str, "--append")) {
+            append_flag = true;
+        } else {
             content_parts.append(allocator, arg_str) catch return Error.AllocationError;
         }
     }
@@ -1050,15 +1070,8 @@ fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
     const new_content = content_buffer.toOwnedSlice(allocator) catch return Error.AllocationError;
     defer allocator.free(new_content);
 
-    // Check for --json flag
-    var use_json = false;
-    for (args[3..]) |arg| {
-        const a = std.mem.sliceTo(arg, 0);
-        if (std.mem.eql(u8, a, "--json")) {
-            use_json = true;
-            break;
-        }
-    }
+    // Determine if we should append: explicit --append flag OR agent mode (auto-append)
+    const should_append = append_flag or is_agent_mode;
 
     // Load task list
     var task_list = loadTaskList(repo, allocator) catch |err| {
@@ -1083,9 +1096,17 @@ fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 
     const task = found_task.?;
 
-    // Update task content
-    allocator.free(task.content); // Free old content
-    task.content = allocator.dupe(u8, new_content) catch return Error.AllocationError;
+    // Update task content - either append or replace
+    if (should_append) {
+        // Append mode: preserve original content, add separator and new content
+        const appended_content = appendToTask(allocator, task.content, new_content) catch return Error.AllocationError;
+        allocator.free(task.content); // Free old content
+        task.content = appended_content;
+    } else {
+        // Replace mode: overwrite content entirely
+        allocator.free(task.content); // Free old content
+        task.content = allocator.dupe(u8, new_content) catch return Error.AllocationError;
+    }
 
     // Save updated task list
     saveTaskList(repo, task_list, allocator) catch |err| {
@@ -1095,23 +1116,47 @@ fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 
     // Output confirmation
     if (use_json) {
-        // JSON output
+        // JSON output - need to escape content which may now contain newlines
         const completed_str = if (task.completed) |comp| try std.fmt.allocPrint(allocator, "{}", .{comp}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
         defer allocator.free(completed_str);
 
-        const after_str = if (task.after) |a| try std.fmt.allocPrint(allocator, "\"{s}\"", .{a}) else allocator.dupe(u8, "null") catch return Error.AllocationError;
-        defer allocator.free(after_str);
+        const escaped_content = escapeJsonString(allocator, task.content) catch return Error.AllocationError;
+        defer allocator.free(escaped_content);
 
         const json_output = try std.fmt.allocPrint(allocator,
-            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s},\"after\":{s}}}",
-            .{ task.id, task.content, task.status, task.created, completed_str, after_str }
+            "{{\"id\":\"{s}\",\"content\":\"{s}\",\"status\":\"{s}\",\"created\":{},\"completed\":{s}}}",
+            .{ task.id, escaped_content, task.status, task.created, completed_str }
         );
         defer allocator.free(json_output);
 
         stdout.print("{s}\n", .{json_output}) catch {};
     } else {
-        stdout.print("updated: {s}\n  {s}\n", .{ task_id, new_content }) catch {};
+        if (should_append) {
+            stdout.print("appended: {s}\n  {s}\n", .{ task_id, new_content }) catch {};
+        } else {
+            stdout.print("updated: {s}\n  {s}\n", .{ task_id, new_content }) catch {};
+        }
     }
+}
+
+/// Append new content to existing task content with a separator.
+/// Format: "original content\n---\nnew content"
+fn appendToTask(allocator: std.mem.Allocator, original: []const u8, addition: []const u8) Error![]u8 {
+    const separator = "\n---\n";
+    const total_len = original.len + separator.len + addition.len;
+
+    var result = allocator.alloc(u8, total_len) catch return Error.AllocationError;
+    var pos: usize = 0;
+
+    @memcpy(result[pos..][0..original.len], original);
+    pos += original.len;
+
+    @memcpy(result[pos..][0..separator.len], separator);
+    pos += separator.len;
+
+    @memcpy(result[pos..][0..addition.len], addition);
+
+    return result;
 }
 
 fn runDelete(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
@@ -1166,19 +1211,212 @@ fn runDelete(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposit
         return Error.TaskNotFound;
     }
 
-    // Check if any other tasks depend on this one
-    for (task_list.tasks.items) |task| {
-        if (task.after) |dependency_id| {
-            if (std.mem.eql(u8, dependency_id, task_id)) {
-                stdout.print("error: task '{s}' cannot be deleted (task '{s}' depends on it)\n", .{ task_id, task.id }) catch {};
-                return Error.InvalidCommand;
+    // Remove the task
+    var removed_task = task_list.tasks.swapRemove(found_index.?);
+
+    // Save updated task list
+    saveTaskList(repo, task_list, allocator) catch |err| {
+        stdout.print("error: failed to save tasks: {}\n", .{err}) catch {};
+        removed_task.deinit(allocator);
+        return err;
+    };
+
+    // Output confirmation (must happen before deinit frees task_content)
+    if (use_json) {
+        stdout.print("{{\"deleted\":\"{s}\"}}\n", .{task_id}) catch {};
+    } else {
+        stdout.print("deleted: {s}\n  {s}\n", .{ task_id, task_content }) catch {};
+    }
+
+    removed_task.deinit(allocator);
+}
+
+/// Parse markdown content and extract task items from numbered lists.
+/// Supports formats like:
+/// - "1. Task description"
+/// - "1) Task description"
+/// - "- [ ] Task description" (checkbox format)
+/// - "- Task description" (bullet format)
+fn parseTasksFromMarkdown(allocator: std.mem.Allocator, content: []const u8) !std.ArrayList([]const u8) {
+    var tasks = std.ArrayList([]const u8){};
+    errdefer {
+        for (tasks.items) |t| allocator.free(t);
+        tasks.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+
+        var task_content: ?[]const u8 = null;
+
+        // Check for numbered list: "1. " or "1) "
+        if (trimmed.len > 2) {
+            var i: usize = 0;
+            // Skip digits
+            while (i < trimmed.len and std.ascii.isDigit(trimmed[i])) {
+                i += 1;
+            }
+            // Check for ". " or ") " after digits
+            if (i > 0 and i < trimmed.len - 1) {
+                if ((trimmed[i] == '.' or trimmed[i] == ')') and trimmed[i + 1] == ' ') {
+                    task_content = std.mem.trim(u8, trimmed[i + 2 ..], " \t");
+                }
+            }
+        }
+
+        // Check for checkbox format: "- [ ] " or "- [x] "
+        if (task_content == null and trimmed.len > 5) {
+            if (std.mem.startsWith(u8, trimmed, "- [ ] ") or std.mem.startsWith(u8, trimmed, "- [x] ") or std.mem.startsWith(u8, trimmed, "- [X] ")) {
+                task_content = std.mem.trim(u8, trimmed[6..], " \t");
+            }
+        }
+
+        // Check for bullet format: "- "
+        if (task_content == null and trimmed.len > 2) {
+            if (std.mem.startsWith(u8, trimmed, "- ")) {
+                task_content = std.mem.trim(u8, trimmed[2..], " \t");
+            }
+        }
+
+        // Add non-empty task content
+        if (task_content) |tc| {
+            if (tc.len > 0) {
+                const duped = try allocator.dupe(u8, tc);
+                try tasks.append(allocator, duped);
             }
         }
     }
 
-    // Remove the task
-    var removed_task = task_list.tasks.swapRemove(found_index.?);
-    removed_task.deinit(allocator);
+    return tasks;
+}
+
+fn runImport(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+
+    // Need at least: tasks import <file>
+    if (args.len < 4) {
+        stdout.print("error: missing file path\n\nusage: git tasks import <file> [--dry-run]\n", .{}) catch {};
+        return Error.InvalidCommand;
+    }
+
+    // Parse arguments
+    var file_path: ?[]const u8 = null;
+    var dry_run = false;
+    var use_json = false;
+
+    for (args[3..]) |arg| {
+        const a = std.mem.sliceTo(arg, 0);
+        if (std.mem.eql(u8, a, "--dry-run")) {
+            dry_run = true;
+        } else if (std.mem.eql(u8, a, "--json")) {
+            use_json = true;
+        } else if (file_path == null) {
+            file_path = a;
+        }
+    }
+
+    if (file_path == null) {
+        stdout.print("error: missing file path\n\nusage: git tasks import <file> [--dry-run]\n", .{}) catch {};
+        return Error.InvalidCommand;
+    }
+
+    // Read file content
+    const file = std.fs.cwd().openFile(file_path.?, .{}) catch {
+        stdout.print("error: cannot open file '{s}'\n", .{file_path.?}) catch {};
+        return Error.FileNotFound;
+    };
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch { // 1MB limit
+        stdout.print("error: failed to read file '{s}'\n", .{file_path.?}) catch {};
+        return Error.FileReadError;
+    };
+    defer allocator.free(content);
+
+    // Parse tasks from markdown
+    var parsed_tasks = parseTasksFromMarkdown(allocator, content) catch {
+        stdout.print("error: failed to parse file\n", .{}) catch {};
+        return Error.AllocationError;
+    };
+    defer {
+        for (parsed_tasks.items) |t| allocator.free(t);
+        parsed_tasks.deinit(allocator);
+    }
+
+    if (parsed_tasks.items.len == 0) {
+        stdout.print("error: no tasks found in '{s}'\n", .{file_path.?}) catch {};
+        stdout.print("hint: tasks should be formatted as numbered or bulleted list items\n", .{}) catch {};
+        return Error.NoTasksFound;
+    }
+
+    // Preview mode
+    if (dry_run) {
+        stdout.print("preview: {} task{s} found in '{s}'\n\n", .{
+            parsed_tasks.items.len,
+            if (parsed_tasks.items.len == 1) "" else "s",
+            file_path.?,
+        }) catch {};
+        for (parsed_tasks.items, 0..) |task_content, i| {
+            stdout.print("{}: {s}\n", .{ i + 1, task_content }) catch {};
+        }
+        stdout.print("\nrun without --dry-run to create these tasks\n", .{}) catch {};
+        return;
+    }
+
+    // Load existing task list
+    var task_list = loadTaskList(repo, allocator) catch |err| {
+        stdout.print("error: failed to load tasks: {}\n", .{err}) catch {};
+        return err;
+    };
+    defer task_list.deinit(allocator);
+
+    // Create tasks
+    const now = std.time.timestamp();
+    var created_ids = std.ArrayList([]const u8){};
+    defer {
+        for (created_ids.items) |id| allocator.free(id);
+        created_ids.deinit(allocator);
+    }
+
+    for (parsed_tasks.items) |task_content| {
+        // Generate new task ID
+        const task_id = task_list.generateId(allocator) catch return Error.AllocationError;
+
+        // Duplicate content for task storage
+        const content_dupe = allocator.dupe(u8, task_content) catch {
+            allocator.free(task_id);
+            return Error.AllocationError;
+        };
+
+        const status_dupe = allocator.dupe(u8, "pending") catch {
+            allocator.free(task_id);
+            allocator.free(content_dupe);
+            return Error.AllocationError;
+        };
+
+        const new_task = Task{
+            .id = task_id,
+            .content = content_dupe,
+            .status = status_dupe,
+            .created = now,
+        };
+
+        task_list.tasks.append(allocator, new_task) catch {
+            allocator.free(task_id);
+            allocator.free(content_dupe);
+            allocator.free(status_dupe);
+            return Error.AllocationError;
+        };
+
+        // Track ID for output (make a copy since task_list owns the original)
+        const id_copy = allocator.dupe(u8, task_id) catch return Error.AllocationError;
+        created_ids.append(allocator, id_copy) catch {
+            allocator.free(id_copy);
+            return Error.AllocationError;
+        };
+    }
 
     // Save updated task list
     saveTaskList(repo, task_list, allocator) catch |err| {
@@ -1188,9 +1426,21 @@ fn runDelete(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposit
 
     // Output confirmation
     if (use_json) {
-        stdout.print("{{\"deleted\":\"{s}\"}}\n", .{task_id}) catch {};
+        stdout.print("{{\"imported\":{},\"ids\":[", .{created_ids.items.len}) catch {};
+        for (created_ids.items, 0..) |id, i| {
+            if (i > 0) stdout.print(",", .{}) catch {};
+            stdout.print("\"{s}\"", .{id}) catch {};
+        }
+        stdout.print("]}}\n", .{}) catch {};
     } else {
-        stdout.print("deleted: {s}\n  {s}\n", .{ task_id, task_content }) catch {};
+        stdout.print("imported: {} task{s} from '{s}'\n\n", .{
+            created_ids.items.len,
+            if (created_ids.items.len == 1) "" else "s",
+            file_path.?,
+        }) catch {};
+        for (created_ids.items, 0..) |id, i| {
+            stdout.print("  {s}: {s}\n", .{ id, parsed_tasks.items[i] }) catch {};
+        }
     }
 }
 
@@ -1328,4 +1578,297 @@ test "TaskList.generateId - continues from loaded state" {
 
     try testing.expectEqualStrings("task-042", new_id);
     try testing.expectEqual(@as(u32, 43), task_list.next_id);
+}
+
+test "parseTasksFromMarkdown - numbered list with periods" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const content =
+        \\1. First task
+        \\2. Second task
+        \\3. Third task
+    ;
+
+    var tasks = try parseTasksFromMarkdown(allocator, content);
+    defer {
+        for (tasks.items) |t| allocator.free(t);
+        tasks.deinit(allocator);
+    }
+
+    try testing.expectEqual(@as(usize, 3), tasks.items.len);
+    try testing.expectEqualStrings("First task", tasks.items[0]);
+    try testing.expectEqualStrings("Second task", tasks.items[1]);
+    try testing.expectEqualStrings("Third task", tasks.items[2]);
+}
+
+test "parseTasksFromMarkdown - numbered list with parentheses" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const content =
+        \\1) First task
+        \\2) Second task
+    ;
+
+    var tasks = try parseTasksFromMarkdown(allocator, content);
+    defer {
+        for (tasks.items) |t| allocator.free(t);
+        tasks.deinit(allocator);
+    }
+
+    try testing.expectEqual(@as(usize, 2), tasks.items.len);
+    try testing.expectEqualStrings("First task", tasks.items[0]);
+    try testing.expectEqualStrings("Second task", tasks.items[1]);
+}
+
+test "parseTasksFromMarkdown - bullet list" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const content =
+        \\- Task one
+        \\- Task two
+    ;
+
+    var tasks = try parseTasksFromMarkdown(allocator, content);
+    defer {
+        for (tasks.items) |t| allocator.free(t);
+        tasks.deinit(allocator);
+    }
+
+    try testing.expectEqual(@as(usize, 2), tasks.items.len);
+    try testing.expectEqualStrings("Task one", tasks.items[0]);
+    try testing.expectEqualStrings("Task two", tasks.items[1]);
+}
+
+test "parseTasksFromMarkdown - checkbox format" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const content =
+        \\- [ ] Pending task
+        \\- [x] Completed task
+        \\- [X] Another completed
+    ;
+
+    var tasks = try parseTasksFromMarkdown(allocator, content);
+    defer {
+        for (tasks.items) |t| allocator.free(t);
+        tasks.deinit(allocator);
+    }
+
+    try testing.expectEqual(@as(usize, 3), tasks.items.len);
+    try testing.expectEqualStrings("Pending task", tasks.items[0]);
+    try testing.expectEqualStrings("Completed task", tasks.items[1]);
+    try testing.expectEqualStrings("Another completed", tasks.items[2]);
+}
+
+test "parseTasksFromMarkdown - mixed content ignores non-task lines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const content =
+        \\# Plan
+        \\
+        \\Some description text here.
+        \\
+        \\1. First task
+        \\2. Second task
+        \\
+        \\More explanation.
+    ;
+
+    var tasks = try parseTasksFromMarkdown(allocator, content);
+    defer {
+        for (tasks.items) |t| allocator.free(t);
+        tasks.deinit(allocator);
+    }
+
+    try testing.expectEqual(@as(usize, 2), tasks.items.len);
+    try testing.expectEqualStrings("First task", tasks.items[0]);
+    try testing.expectEqualStrings("Second task", tasks.items[1]);
+}
+
+test "parseTasksFromMarkdown - empty content" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tasks = try parseTasksFromMarkdown(allocator, "");
+    defer {
+        for (tasks.items) |t| allocator.free(t);
+        tasks.deinit(allocator);
+    }
+
+    try testing.expectEqual(@as(usize, 0), tasks.items.len);
+}
+
+test "parseTasksFromMarkdown - handles indentation" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const content =
+        \\  1. Indented task
+        \\    - Bullet with indent
+    ;
+
+    var tasks = try parseTasksFromMarkdown(allocator, content);
+    defer {
+        for (tasks.items) |t| allocator.free(t);
+        tasks.deinit(allocator);
+    }
+
+    try testing.expectEqual(@as(usize, 2), tasks.items.len);
+    try testing.expectEqualStrings("Indented task", tasks.items[0]);
+    try testing.expectEqualStrings("Bullet with indent", tasks.items[1]);
+}
+
+test "appendToTask - basic append" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try appendToTask(allocator, "Fix bug in X", "Found root cause: Y");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("Fix bug in X\n---\nFound root cause: Y", result);
+}
+
+test "appendToTask - multiple appends" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // First append
+    const first = try appendToTask(allocator, "Original task", "First note");
+    defer allocator.free(first);
+
+    // Second append (simulating multiple agent edits)
+    const second = try appendToTask(allocator, first, "Second note");
+    defer allocator.free(second);
+
+    try testing.expectEqualStrings("Original task\n---\nFirst note\n---\nSecond note", second);
+}
+
+test "appendToTask - empty original" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try appendToTask(allocator, "", "New content");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("\n---\nNew content", result);
+}
+
+test "appendToTask - empty addition" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try appendToTask(allocator, "Original", "");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("Original\n---\n", result);
+}
+
+test "appendToTask - content with newlines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Test appending content that contains newlines
+    const result = try appendToTask(allocator, "Original task", "Line 1\nLine 2\nLine 3");
+    defer allocator.free(result);
+
+    // The append function preserves newlines - escaping happens at storage layer
+    try testing.expectEqualStrings("Original task\n---\nLine 1\nLine 2\nLine 3", result);
+}
+
+test "appendToTask - both original and addition have newlines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Test when both original content and addition have newlines
+    const result = try appendToTask(allocator, "Task line 1\nTask line 2", "Note line 1\nNote line 2");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("Task line 1\nTask line 2\n---\nNote line 1\nNote line 2", result);
+}
+
+test "escapeContentForStorage - handles newlines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try escapeContentForStorage(allocator, "line1\nline2");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("line1\\nline2", result);
+}
+
+test "escapeContentForStorage - handles pipes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try escapeContentForStorage(allocator, "field1|field2");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("field1\\pfield2", result);
+}
+
+test "escapeContentForStorage - handles backslashes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try escapeContentForStorage(allocator, "path\\to\\file");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("path\\\\to\\\\file", result);
+}
+
+test "unescapeContentFromStorage - handles newlines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try unescapeContentFromStorage(allocator, "line1\\nline2");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("line1\nline2", result);
+}
+
+test "unescapeContentFromStorage - handles pipes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try unescapeContentFromStorage(allocator, "field1\\pfield2");
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("field1|field2", result);
+}
+
+test "escape/unescape roundtrip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const original = "Task content\n---\nNote with newline\nand pipe|char\\and backslash";
+    const escaped = try escapeContentForStorage(allocator, original);
+    defer allocator.free(escaped);
+    const unescaped = try unescapeContentFromStorage(allocator, escaped);
+    defer allocator.free(unescaped);
+
+    try testing.expectEqualStrings(original, unescaped);
 }

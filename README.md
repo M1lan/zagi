@@ -94,6 +94,27 @@ export ZAGI_AGENT=claude-code
 readonly ZAGI_AGENT
 ```
 
+### Environment variables
+
+| Variable | Description | Default | Valid values |
+|----------|-------------|---------|--------------|
+| `ZAGI_AGENT` | Enables guardrails and prompt enforcement. Also selects the built-in executor for `zagi agent` commands. | (unset) | Any string enables guardrails. For executors: `claude`, `opencode` |
+| `ZAGI_AGENT_CMD` | Custom executor command override. When set, the prompt is appended as the final argument. | (unset) | Any shell command (e.g., `aider --yes`) |
+| `ZAGI_STRIP_COAUTHORS` | Strips `Co-Authored-By:` lines from commit messages. | (unset) | `1` to enable |
+
+**Executor precedence**: If `ZAGI_AGENT_CMD` is set, it overrides `ZAGI_AGENT` for executor selection. The guardrails remain active regardless.
+
+```bash
+# Use Claude Code (default)
+ZAGI_AGENT=claude zagi agent run
+
+# Use opencode
+ZAGI_AGENT=opencode zagi agent run
+
+# Use a custom command
+ZAGI_AGENT_CMD="aider --yes" zagi agent run
+```
+
 ### Strip co-authors
 
 Remove `Co-Authored-By:` lines that AI tools like Claude Code add to commit messages:

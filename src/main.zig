@@ -8,6 +8,7 @@ const commit = @import("cmds/commit.zig");
 const diff = @import("cmds/diff.zig");
 const fork = @import("cmds/fork.zig");
 const tasks = @import("cmds/tasks.zig");
+const agent = @import("cmds/agent.zig");
 const git = @import("cmds/git.zig");
 
 const version = "0.1.0";
@@ -21,6 +22,7 @@ const Command = enum {
     diff_cmd,
     fork_cmd,
     tasks_cmd,
+    agent_cmd,
     other,
 };
 
@@ -99,6 +101,9 @@ fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     } else if (std.mem.eql(u8, cmd, "tasks")) {
         current_command = .tasks_cmd;
         try tasks.run(allocator, args);
+    } else if (std.mem.eql(u8, cmd, "agent")) {
+        current_command = .agent_cmd;
+        try agent.run(allocator, args);
     } else {
         // Unknown command: pass through to git
         current_command = .other;
@@ -121,6 +126,7 @@ fn printHelp(stdout: anytype) !void {
         \\  commit    Create a commit
         \\  fork      Manage parallel worktrees
         \\  tasks     Task management for git repositories
+        \\  agent     Execute RALPH loop to complete tasks
         \\  alias     Create an alias to git
         \\
         \\options:
@@ -209,6 +215,7 @@ fn printUsageHelp(stderr: anytype, cmd: Command) void {
         .diff_cmd => diff.help,
         .fork_cmd => fork.help,
         .tasks_cmd => tasks.help,
+        .agent_cmd => agent.help,
         .other => "usage: git <command> [args...]\n",
     };
 
