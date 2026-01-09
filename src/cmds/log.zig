@@ -5,7 +5,7 @@ const c = git.c;
 pub const help =
     \\usage: git log [-n <count>] [--author=<pattern>] [--grep=<pattern>]
     \\               [--since=<date>] [--until=<date>] [--prompts] [--agent]
-    \\               [--session] [-- <path>...]
+    \\               [--session] [<revision-range>] [-- <path>...]
     \\
     \\Show commit history.
     \\
@@ -17,10 +17,12 @@ pub const help =
     \\  --until=<date>   Show commits before date
     \\  --prompts        Show AI prompts attached to commits
     \\  --agent          Show AI agent that made the commit
-    \\  --session        Show session transcript (first 20k chars)
-    \\  --session-offset=N  Start session display at byte N
-    \\  --session-limit=N   Limit session display to N bytes (default: 20000)
+    \\  --session        Show session summary (prompts table for commit range)
     \\  -- <path>...     Show commits affecting paths
+    \\
+    \\Revision Range:
+    \\  <commit1>..<commit2>  Show commits reachable from commit2 but not commit1
+    \\  origin/main..HEAD     Show commits on current branch not in origin/main
     \\
 ;
 
@@ -36,9 +38,8 @@ const Options = struct {
     pathspec_count: usize = 0,
     show_prompts: bool = false,
     show_agent: bool = false,
-    show_session: bool = false,
-    session_offset: usize = 0,
-    session_limit: usize = 20000,
+    show_session: bool = false, // Shows session summary table
+    revision_range: ?[]const u8 = null, // e.g. "origin/main..HEAD"
 };
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{OutOfMemory})!void {
@@ -102,17 +103,18 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
             opts.show_agent = true;
         } else if (std.mem.eql(u8, arg, "--session")) {
             opts.show_session = true;
-        } else if (std.mem.startsWith(u8, arg, "--session-offset=")) {
-            opts.session_offset = std.fmt.parseInt(usize, arg[17..], 10) catch 0;
-        } else if (std.mem.startsWith(u8, arg, "--session-limit=")) {
-            opts.session_limit = std.fmt.parseInt(usize, arg[16..], 10) catch 20000;
         } else if (std.mem.startsWith(u8, arg, "-") or std.mem.startsWith(u8, arg, "--")) {
             // Unknown flag - passthrough to git
             return git.Error.UnsupportedFlag;
         }
-        // Non-flag arguments (revision specs) - passthrough for now
+        // Non-flag arguments - check for revision range (contains ..)
         else if (!std.mem.startsWith(u8, arg, "-")) {
-            return git.Error.UnsupportedFlag;
+            if (std.mem.indexOf(u8, arg, "..") != null) {
+                opts.revision_range = arg;
+            } else {
+                // Single revision spec - treat as range from that commit to HEAD
+                opts.revision_range = arg;
+            }
         }
     }
 
@@ -138,11 +140,101 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
 
     _ = c.git_revwalk_sorting(walk, c.GIT_SORT_TIME);
 
-    if (c.git_revwalk_push_head(walk) < 0) {
+    // Handle revision range
+    var range_start: ?[]const u8 = null;
+    var range_end: []const u8 = "HEAD";
+
+    if (opts.revision_range) |range| {
+        if (std.mem.indexOf(u8, range, "..")) |idx| {
+            range_start = range[0..idx];
+            range_end = range[idx + 2 ..];
+        } else {
+            // Single revision - show commits reachable from it
+            range_end = range;
+        }
+    }
+
+    // Push the end of the range (commits to include)
+    var end_oid: c.git_oid = undefined;
+    if (resolveRevision(repo, range_end, &end_oid)) {
+        if (c.git_revwalk_push(walk, &end_oid) < 0) {
+            return git.Error.RevwalkFailed;
+        }
+    } else if (c.git_revwalk_push_head(walk) < 0) {
         return git.Error.RevwalkFailed;
     }
 
-    // Walk commits
+    // Hide commits before the start (if range specified)
+    if (range_start) |start| {
+        var start_oid: c.git_oid = undefined;
+        if (resolveRevision(repo, start, &start_oid)) {
+            _ = c.git_revwalk_hide(walk, &start_oid);
+        }
+    }
+
+    // For session mode, collect all commits and show summary table
+    if (opts.show_session) {
+        var commits = std.array_list.AlignedManaged(CommitInfo, null).init(allocator);
+        defer {
+            for (commits.items) |info| {
+                allocator.free(info.sha);
+                if (info.prompt) |p| allocator.free(p);
+            }
+            commits.deinit();
+        }
+
+        var oid: c.git_oid = undefined;
+        while (c.git_revwalk_next(&oid, walk) == 0) {
+            var commit: ?*c.git_commit = null;
+            if (c.git_commit_lookup(&commit, repo, &oid) < 0) continue;
+            defer c.git_commit_free(commit);
+
+            if (!commitMatchesFilters(repo, commit.?, opts)) continue;
+
+            // Get SHA
+            var sha_buf: [8]u8 = undefined;
+            _ = c.git_oid_tostr(&sha_buf, sha_buf.len, &oid);
+
+            // Get prompt note
+            var prompt_text: ?[]const u8 = null;
+            var note: ?*c.git_note = null;
+            if (c.git_note_read(&note, repo, "refs/notes/prompt", &oid) == 0) {
+                defer c.git_note_free(note);
+                if (c.git_note_message(note)) |msg| {
+                    const full = std.mem.sliceTo(msg, 0);
+                    // Truncate to first 80 chars
+                    const max: usize = 80;
+                    const len = @min(full.len, max);
+                    prompt_text = allocator.dupe(u8, full[0..len]) catch null;
+                }
+            }
+
+            commits.append(.{
+                .sha = allocator.dupe(u8, sha_buf[0..7]) catch continue,
+                .prompt = prompt_text,
+            }) catch continue;
+        }
+
+        // Print session summary (in reverse order - oldest first)
+        if (commits.items.len > 0) {
+            const first_sha = commits.items[commits.items.len - 1].sha;
+            const last_sha = commits.items[0].sha;
+            stdout.print("## Session Summary ({s}..{s})\n\n", .{ first_sha, last_sha }) catch return git.Error.WriteFailed;
+            stdout.print("| Commit | Prompt |\n", .{}) catch return git.Error.WriteFailed;
+            stdout.print("|--------|--------|\n", .{}) catch return git.Error.WriteFailed;
+
+            var idx = commits.items.len;
+            while (idx > 0) {
+                idx -= 1;
+                const info = commits.items[idx];
+                const prompt = info.prompt orelse "(no prompt)";
+                stdout.print("| {s} | {s} |\n", .{ info.sha, prompt }) catch return git.Error.WriteFailed;
+            }
+        }
+        return;
+    }
+
+    // Walk commits (normal mode)
     var oid: c.git_oid = undefined;
     var count: usize = 0;
     var total_matching: usize = 0;
@@ -175,6 +267,28 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
         const remaining = total_matching - opts.max_count;
         stdout.print("\n[{d} more commits, use -n to see more]\n", .{remaining}) catch return git.Error.WriteFailed;
     }
+}
+
+const CommitInfo = struct {
+    sha: []const u8,
+    prompt: ?[]const u8,
+};
+
+/// Resolve a revision string to an OID
+fn resolveRevision(repo: ?*c.git_repository, spec: []const u8, oid: *c.git_oid) bool {
+    var buf: [256]u8 = undefined;
+    if (spec.len >= buf.len) return false;
+    @memcpy(buf[0..spec.len], spec);
+    buf[spec.len] = 0;
+
+    var obj: ?*c.git_object = null;
+    if (c.git_revparse_single(&obj, repo, &buf) < 0) {
+        return false;
+    }
+    defer c.git_object_free(obj);
+
+    oid.* = c.git_object_id(obj).*;
+    return true;
 }
 
 fn printCommit(
@@ -261,45 +375,6 @@ fn printCommit(
         note = null;
     }
 
-    // Show session transcript if requested
-    if (opts.show_session) {
-        if (c.git_note_read(&note, repo, "refs/notes/session", oid) == 0) {
-            defer c.git_note_free(note);
-            const note_msg = c.git_note_message(note);
-            if (note_msg) |msg| {
-                const session_text = std.mem.sliceTo(msg, 0);
-                const total_len = session_text.len;
-
-                // Check if it's new markdown format (starts with <details>)
-                if (std.mem.startsWith(u8, session_text, "<details>")) {
-                    // Markdown format - display directly (already human-readable)
-                    try writer.print("  session:\n{s}\n", .{session_text});
-                } else {
-                    // Legacy JSON format - use byte pagination
-                    if (opts.session_offset >= total_len) {
-                        try writer.print("  session: (offset {d} beyond end, total {d} bytes)\n", .{ opts.session_offset, total_len });
-                    } else {
-                        const start = opts.session_offset;
-                        const remaining = total_len - start;
-                        const display_len = @min(remaining, opts.session_limit);
-                        const end = start + display_len;
-
-                        if (start > 0 or end < total_len) {
-                            try writer.print("  session [{d}-{d} of {d} bytes]:\n  ", .{ start, end, total_len });
-                        } else {
-                            try writer.print("  session:\n  ", .{});
-                        }
-                        try writer.print("{s}", .{session_text[start..end]});
-                        if (end < total_len) {
-                            try writer.print("\n  ... ({d} more bytes, use --session-offset={d})\n", .{ total_len - end, end });
-                        } else {
-                            try writer.print("\n", .{});
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn formatDate(allocator: std.mem.Allocator, timestamp: i64) ![]u8 {
