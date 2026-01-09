@@ -598,7 +598,7 @@ describe("error handling", () => {
   test("shows error in non-git directory", () => {
     const result = zagi(["tasks", "add", "Test task"], { cwd: "/tmp" });
 
-    // Should show error - either "error" or "fatal" depending on git behavior
+    // libgit2 outputs "fatal:" for non-repo errors
     expect(result.toLowerCase()).toMatch(/error|fatal/);
   });
 });
