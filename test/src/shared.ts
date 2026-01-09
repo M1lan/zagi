@@ -21,12 +21,23 @@ export function zagi(args: string[], options: ZagiOptions = {}): string {
   // Create isolated env - start with current env
   const env = { ...process.env };
 
-  // By default, remove zagi env vars unless explicitly set
+  // By default, remove agent mode env vars unless explicitly set
+  // This ensures tests run outside agent mode by default
   if (!("ZAGI_AGENT" in envOverrides)) {
     delete env.ZAGI_AGENT;
   }
+  if (!("ZAGI_AGENT_CMD" in envOverrides)) {
+    delete env.ZAGI_AGENT_CMD;
+  }
   if (!("ZAGI_STRIP_COAUTHORS" in envOverrides)) {
     delete env.ZAGI_STRIP_COAUTHORS;
+  }
+  // Also clear CLAUDECODE and OPENCODE which trigger agent mode
+  if (!("CLAUDECODE" in envOverrides)) {
+    delete env.CLAUDECODE;
+  }
+  if (!("OPENCODE" in envOverrides)) {
+    delete env.OPENCODE;
   }
 
   // Apply overrides (undefined removes the key)

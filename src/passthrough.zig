@@ -3,13 +3,14 @@ const guardrails = @import("guardrails.zig");
 const edit = @import("cmds/edit.zig");
 const git = @import("cmds/git.zig");
 const c = git.c;
+const detect = @import("cmds/detect.zig");
 
 /// Pass through a command to git CLI
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const stderr = std.fs.File.stderr().deprecatedWriter();
 
     // Check guardrails in agent mode
-    if (guardrails.isAgentMode()) {
+    if (detect.isAgentMode()) {
         // Cast to const for checkBlocked
         const const_args: []const [:0]const u8 = @ptrCast(args);
         if (guardrails.checkBlocked(const_args)) |reason| {

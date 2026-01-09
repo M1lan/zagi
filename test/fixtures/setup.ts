@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { resolve } from "path";
 
 const FIXTURES_BASE = resolve(__dirname, "repos");
-const COMMIT_COUNT = 100;
+// Reduced from 100 to 20 - enough for testing pagination/filtering but much faster
+const COMMIT_COUNT = 20;
 
 // Generate unique IDs for parallel safety
 function uid() {

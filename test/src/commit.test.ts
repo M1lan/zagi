@@ -1,7 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { resolve } from "path";
-import { writeFileSync, appendFileSync, rmSync } from "fs";
-import { createFixtureRepo } from "../fixtures/setup";
+import { writeFileSync, appendFileSync } from "fs";
 import { zagi, git, createTestRepo, cleanupTestRepo } from "./shared";
 
 let REPO_DIR: string;
@@ -12,14 +11,13 @@ function stageTestFile() {
   git(["add", "commit-test.txt"], { cwd: REPO_DIR });
 }
 
+// Use lightweight repo - these tests don't need multiple commits
 beforeEach(() => {
-  REPO_DIR = createFixtureRepo();
+  REPO_DIR = createTestRepo();
 });
 
 afterEach(() => {
-  if (REPO_DIR) {
-    rmSync(REPO_DIR, { recursive: true, force: true });
-  }
+  cleanupTestRepo(REPO_DIR);
 });
 
 describe("zagi commit", () => {
@@ -101,10 +99,14 @@ describe("zagi commit --prompt", () => {
       "My test prompt text",
     ], { cwd: REPO_DIR });
 
-    // Read the note using git notes command
-    const noteResult = git(["notes", "--ref=prompts", "show", "HEAD"], { cwd: REPO_DIR });
+    // Agent name stored in refs/notes/agent (plain text)
+    const agentNote = git(["notes", "--ref=agent", "show", "HEAD"], { cwd: REPO_DIR });
+    // Agent will be "terminal" in test env (CLAUDECODE cleared), or actual agent if set
+    expect(agentNote.trim().length).toBeGreaterThan(0);
 
-    expect(noteResult).toContain("My test prompt text");
+    // Prompt stored in refs/notes/prompt (plain text)
+    const promptNote = git(["notes", "--ref=prompt", "show", "HEAD"], { cwd: REPO_DIR });
+    expect(promptNote).toContain("My test prompt text");
   });
 
   test("prompt shown with --prompts in log", () => {
@@ -150,7 +152,7 @@ describe("ZAGI_AGENT", () => {
     );
 
     expect(result).toContain("--prompt required");
-    expect(result).toContain("ZAGI_AGENT");
+    expect(result).toContain("agent mode");
   });
 
   test("ZAGI_AGENT succeeds with --prompt", () => {

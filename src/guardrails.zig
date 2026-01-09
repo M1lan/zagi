@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// Guardrails for agent mode (ZAGI_AGENT).
+/// Guardrails for agent mode.
 /// Blocks commands that can cause actual data loss.
 ///
 /// Philosophy: Only block commands where data is UNRECOVERABLE.
@@ -182,11 +182,6 @@ fn hasArg(args: []const [:0]const u8, target: []const u8) bool {
         if (std.mem.eql(u8, arg, target)) return true;
     }
     return false;
-}
-
-/// Check if guardrails should be enforced.
-pub fn isAgentMode() bool {
-    return std.posix.getenv("ZAGI_AGENT") != null;
 }
 
 // Tests

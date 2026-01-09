@@ -3,14 +3,18 @@ const git = @import("git.zig");
 const c = git.c;
 
 pub const help =
-    \\usage: git status [<path>...]
+    \\usage: git status [<path>...] [--json]
     \\
     \\Show working tree status.
+    \\
+    \\Options:
+    \\  --json                 Output in JSON format
     \\
     \\Examples:
     \\  git status              Show all changes
     \\  git status src/         Show changes in src/ directory
     \\  git status *.ts         Show changes to TypeScript files
+    \\  git status --json       Show all changes in JSON format
     \\
 ;
 
@@ -22,12 +26,15 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
     // Parse arguments
     var pathspecs: [MAX_PATHSPECS][*c]u8 = undefined;
     var pathspec_count: usize = 0;
+    var use_json = false;
 
     for (args[2..]) |arg| {
         const a = std.mem.sliceTo(arg, 0);
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             stdout.print("{s}", .{help}) catch {};
             return;
+        } else if (std.mem.eql(u8, a, "--json")) {
+            use_json = true;
         } else if (std.mem.eql(u8, a, "-s") or std.mem.eql(u8, a, "--short")) {
             // Already short format by default, ignore
         } else if (std.mem.eql(u8, a, "-b") or std.mem.eql(u8, a, "--branch")) {

@@ -138,8 +138,19 @@ pub fn run(_: std.mem.Allocator, args: [][:0]u8) DiffError!void {
             // Unknown flag - passthrough to git
             return git.Error.UnsupportedFlag;
         } else if (!std.mem.startsWith(u8, a, "-")) {
-            // Non-flag argument is a revision spec
-            rev_spec = a;
+            // Non-flag argument: could be revision spec or path
+            // Check if it's an existing path first (file or directory)
+            const stat = std.fs.cwd().statFile(a) catch null;
+            if (stat != null) {
+                // It's an existing path - treat as pathspec
+                if (pathspec_count < MAX_PATHSPECS) {
+                    pathspecs[pathspec_count] = @constCast(arg.ptr);
+                    pathspec_count += 1;
+                }
+            } else {
+                // Not a path - treat as revision spec
+                rev_spec = a;
+            }
         }
     }
 

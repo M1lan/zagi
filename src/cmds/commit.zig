@@ -1,5 +1,6 @@
 const std = @import("std");
 const git = @import("git.zig");
+const detect = @import("detect.zig");
 const c = git.c;
 
 pub const help =
@@ -14,8 +15,9 @@ pub const help =
     \\  --prompt <p>   Store the complete user prompt that created this commit
     \\
     \\Environment:
-    \\  ZAGI_AGENT=<name>        Declare agent operator (requires --prompt)
     \\  ZAGI_STRIP_COAUTHORS=1   Remove Co-Authored-By lines from message
+    \\
+    \\Agent mode requires --prompt when agent is detected.
     \\
 ;
 
@@ -69,9 +71,9 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
         return git.Error.UsageError;
     }
 
-    // Check if prompt is required (when running as an AI agent)
-    if (std.posix.getenv("ZAGI_AGENT") != null and prompt == null) {
-        stdout.print("error: --prompt required (ZAGI_AGENT is set)\n", .{}) catch {};
+    // Check if prompt is required (when running in agent mode)
+    if (detect.isAgentMode() and prompt == null) {
+        stdout.print("error: --prompt required in agent mode\n", .{}) catch {};
         stdout.print("hint: use --prompt to record the prompt that created this commit\n", .{}) catch {};
         return git.Error.UsageError;
     }
@@ -272,25 +274,65 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
         }
     }
 
-    // Store prompt as git note if provided
+    // Store metadata in separate git notes (plain text, not JSON)
     if (prompt) |p| {
-        // Copy prompt to null-terminated buffer
-        var prompt_buf: [8192]u8 = undefined;
-        if (p.len < prompt_buf.len) {
-            @memcpy(prompt_buf[0..p.len], p);
-            prompt_buf[p.len] = 0;
+        // Detect agent
+        const agent = detect.detectAgent();
+        var note_oid: c.git_oid = undefined;
 
-            var note_oid: c.git_oid = undefined;
+        // 1. Store agent name in refs/notes/agent
+        _ = c.git_note_create(
+            &note_oid,
+            repo,
+            "refs/notes/agent",
+            signature,
+            signature,
+            &commit_oid,
+            agent.name().ptr,
+            0,
+        );
+
+        // 2. Store prompt in refs/notes/prompt
+        const prompt_z = allocator.allocSentinel(u8, p.len, 0) catch null;
+        if (prompt_z) |pz| {
+            defer allocator.free(pz);
+            @memcpy(pz, p);
             _ = c.git_note_create(
                 &note_oid,
                 repo,
-                "refs/notes/prompts", // Custom namespace for AI prompts
+                "refs/notes/prompt",
                 signature,
                 signature,
                 &commit_oid,
-                &prompt_buf,
-                0, // Don't force overwrite
+                pz.ptr,
+                0,
             );
+        }
+
+        // 3. Store session transcript in refs/notes/session (if available)
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch null;
+        if (cwd) |c_path| {
+            if (detect.readCurrentSession(allocator, agent, c_path)) |session| {
+                defer allocator.free(session.path);
+                defer allocator.free(session.transcript);
+
+                const session_z = allocator.allocSentinel(u8, session.transcript.len, 0) catch null;
+                if (session_z) |sz| {
+                    defer allocator.free(sz);
+                    @memcpy(sz, session.transcript);
+                    _ = c.git_note_create(
+                        &note_oid,
+                        repo,
+                        "refs/notes/session",
+                        signature,
+                        signature,
+                        &commit_oid,
+                        sz.ptr,
+                        0,
+                    );
+                }
+            }
         }
     }
 

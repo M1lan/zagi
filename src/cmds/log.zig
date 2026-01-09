@@ -4,7 +4,8 @@ const c = git.c;
 
 pub const help =
     \\usage: git log [-n <count>] [--author=<pattern>] [--grep=<pattern>]
-    \\               [--since=<date>] [--until=<date>] [--prompts] [-- <path>...]
+    \\               [--since=<date>] [--until=<date>] [--prompts] [--agent]
+    \\               [--session] [-- <path>...]
     \\
     \\Show commit history.
     \\
@@ -15,6 +16,10 @@ pub const help =
     \\  --since=<date>   Show commits after date (e.g. 2025-01-01, "1 week ago")
     \\  --until=<date>   Show commits before date
     \\  --prompts        Show AI prompts attached to commits
+    \\  --agent          Show AI agent that made the commit
+    \\  --session        Show session transcript (first 20k chars)
+    \\  --session-offset=N  Start session display at byte N
+    \\  --session-limit=N   Limit session display to N bytes (default: 20000)
     \\  -- <path>...     Show commits affecting paths
     \\
 ;
@@ -30,6 +35,10 @@ const Options = struct {
     pathspecs: [MAX_PATHSPECS][*c]u8 = undefined,
     pathspec_count: usize = 0,
     show_prompts: bool = false,
+    show_agent: bool = false,
+    show_session: bool = false,
+    session_offset: usize = 0,
+    session_limit: usize = 20000,
 };
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{OutOfMemory})!void {
@@ -89,6 +98,14 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
             // Already one-line format by default, ignore
         } else if (std.mem.eql(u8, arg, "--prompts")) {
             opts.show_prompts = true;
+        } else if (std.mem.eql(u8, arg, "--agent")) {
+            opts.show_agent = true;
+        } else if (std.mem.eql(u8, arg, "--session")) {
+            opts.show_session = true;
+        } else if (std.mem.startsWith(u8, arg, "--session-offset=")) {
+            opts.session_offset = std.fmt.parseInt(usize, arg[17..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, arg, "--session-limit=")) {
+            opts.session_limit = std.fmt.parseInt(usize, arg[16..], 10) catch 20000;
         } else if (std.mem.startsWith(u8, arg, "-") or std.mem.startsWith(u8, arg, "--")) {
             // Unknown flag - passthrough to git
             return git.Error.UnsupportedFlag;
@@ -196,21 +213,84 @@ fn printCommit(
         try writer.print("{s} {s}\n", .{ sha[0..7], subject });
     }
 
-    // Show prompt note if requested
+    const repo = c.git_commit_owner(commit);
+    var note: ?*c.git_note = null;
+
+    // Show agent if requested
+    if (opts.show_agent) {
+        if (c.git_note_read(&note, repo, "refs/notes/agent", oid) == 0) {
+            defer c.git_note_free(note);
+            const note_msg = c.git_note_message(note);
+            if (note_msg) |msg| {
+                const agent_name = std.mem.sliceTo(msg, 0);
+                try writer.print("  agent: {s}\n", .{agent_name});
+            }
+        }
+        note = null;
+    }
+
+    // Show prompt if requested
     if (opts.show_prompts) {
-        const repo = c.git_commit_owner(commit);
-        var note: ?*c.git_note = null;
-        if (c.git_note_read(&note, repo, "refs/notes/prompts", oid) == 0) {
+        if (c.git_note_read(&note, repo, "refs/notes/prompt", oid) == 0) {
             defer c.git_note_free(note);
             const note_msg = c.git_note_message(note);
             if (note_msg) |msg| {
                 const prompt_text = std.mem.sliceTo(msg, 0);
-                // Truncate long prompts for display
                 const max_len: usize = 200;
                 if (prompt_text.len > max_len) {
                     try writer.print("  prompt: {s}...\n", .{prompt_text[0..max_len]});
                 } else {
                     try writer.print("  prompt: {s}\n", .{prompt_text});
+                }
+            }
+        }
+        // Fallback to legacy refs/notes/prompts (will be removed in future)
+        else if (c.git_note_read(&note, repo, "refs/notes/prompts", oid) == 0) {
+            defer c.git_note_free(note);
+            const note_msg = c.git_note_message(note);
+            if (note_msg) |msg| {
+                const prompt_text = std.mem.sliceTo(msg, 0);
+                const max_len: usize = 200;
+                if (prompt_text.len > max_len) {
+                    try writer.print("  prompt: {s}...\n", .{prompt_text[0..max_len]});
+                } else {
+                    try writer.print("  prompt: {s}\n", .{prompt_text});
+                }
+            }
+        }
+        note = null;
+    }
+
+    // Show session transcript if requested (with offset/limit pagination)
+    if (opts.show_session) {
+        if (c.git_note_read(&note, repo, "refs/notes/session", oid) == 0) {
+            defer c.git_note_free(note);
+            const note_msg = c.git_note_message(note);
+            if (note_msg) |msg| {
+                const session_text = std.mem.sliceTo(msg, 0);
+                const total_len = session_text.len;
+
+                // Apply offset and limit
+                if (opts.session_offset >= total_len) {
+                    try writer.print("  session: (offset {d} beyond end, total {d} bytes)\n", .{ opts.session_offset, total_len });
+                } else {
+                    const start = opts.session_offset;
+                    const remaining = total_len - start;
+                    const display_len = @min(remaining, opts.session_limit);
+                    const end = start + display_len;
+
+                    if (start > 0 or end < total_len) {
+                        // Show range info when using offset or truncated
+                        try writer.print("  session [{d}-{d} of {d} bytes]:\n  ", .{ start, end, total_len });
+                    } else {
+                        try writer.print("  session:\n  ", .{});
+                    }
+                    try writer.print("{s}", .{session_text[start..end]});
+                    if (end < total_len) {
+                        try writer.print("\n  ... ({d} more bytes, use --session-offset={d})\n", .{ total_len - end, end });
+                    } else {
+                        try writer.print("\n", .{});
+                    }
                 }
             }
         }

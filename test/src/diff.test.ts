@@ -1,19 +1,24 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { resolve } from "path";
-import { rmSync, writeFileSync, readFileSync } from "fs";
-import { createFixtureRepo } from "../fixtures/setup";
-import { zagi, git } from "./shared";
+import { writeFileSync, readFileSync, mkdirSync, appendFileSync } from "fs";
+import { zagi, git, createTestRepo, cleanupTestRepo } from "./shared";
 
 let REPO_DIR: string;
 
+// Use lightweight repo - these tests don't need multiple commits
 beforeEach(() => {
-  REPO_DIR = createFixtureRepo();
+  REPO_DIR = createTestRepo();
+  // Create test files for diff operations - needs enough lines to test deletions
+  mkdirSync(resolve(REPO_DIR, "src"), { recursive: true });
+  writeFileSync(resolve(REPO_DIR, "src/main.ts"), 'export function main() {\n  console.log("hello");\n  // line 3\n  // line 4\n  // line 5\n  // line 6\n}\n');
+  git(["add", "src/main.ts"], { cwd: REPO_DIR });
+  git(["commit", "-m", "Add main.ts"], { cwd: REPO_DIR });
+  // Create uncommitted changes for diff tests
+  appendFileSync(resolve(REPO_DIR, "src/main.ts"), "\n// Modified\n");
 });
 
 afterEach(() => {
-  if (REPO_DIR) {
-    rmSync(REPO_DIR, { recursive: true, force: true });
-  }
+  cleanupTestRepo(REPO_DIR);
 });
 
 describe("zagi diff", () => {
@@ -326,5 +331,36 @@ describe("zagi diff --name-only", () => {
 
     const result = zagi(["diff", "--name-only", "HEAD~1..HEAD"], { cwd: REPO_DIR });
     expect(result).toContain("src/main.ts");
+  });
+});
+
+describe("zagi diff file path handling", () => {
+  test("file path without -- is treated as path, not revision", () => {
+    // This was a bug: `git diff path/to/file` would fail with
+    // "failed to walk commits" because the path was treated as a revision
+    const result = zagi(["diff", "src/main.ts"], { cwd: REPO_DIR });
+
+    // Should show diff for that file, not error
+    expect(result).toContain("src/main.ts");
+    expect(result).not.toContain("failed to walk");
+  });
+
+  test("non-existent path is treated as revision spec", () => {
+    // If path doesn't exist, treat as revision (will fail appropriately)
+    const result = zagi(["diff", "nonexistent-branch"], { cwd: REPO_DIR });
+
+    // Should fail because it's not a valid revision
+    expect(result).toContain("failed to walk commits");
+  });
+
+  test("multiple file paths work without --", () => {
+    // Create another file with changes
+    writeFileSync(resolve(REPO_DIR, "README.md"), "# Updated\n");
+
+    const result = zagi(["diff", "src/main.ts", "README.md"], { cwd: REPO_DIR });
+
+    // Should show diff for both files
+    expect(result).toContain("src/main.ts");
+    expect(result).toContain("README.md");
   });
 });

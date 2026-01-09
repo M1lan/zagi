@@ -1,18 +1,20 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { rmSync } from "fs";
-import { createFixtureRepo } from "../fixtures/setup";
-import { zagi, git } from "./shared";
+import { writeFileSync, mkdirSync } from "fs";
+import { resolve } from "path";
+import { zagi, git, createTestRepo, cleanupTestRepo } from "./shared";
 
 let REPO_DIR: string;
 
+// Use lightweight repo - these tests don't need multiple commits
 beforeEach(() => {
-  REPO_DIR = createFixtureRepo();
+  REPO_DIR = createTestRepo();
+  // Create an untracked file for testing
+  mkdirSync(resolve(REPO_DIR, "src"), { recursive: true });
+  writeFileSync(resolve(REPO_DIR, "src/new-file.ts"), "// New file\n");
 });
 
 afterEach(() => {
-  if (REPO_DIR) {
-    rmSync(REPO_DIR, { recursive: true, force: true });
-  }
+  cleanupTestRepo(REPO_DIR);
 });
 
 describe("zagi add", () => {

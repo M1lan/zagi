@@ -39,6 +39,11 @@ Options:
 - `--grep=<pattern>` - filter by commit message
 - `--since=<date>` - commits after date (e.g. "2025-01-01", "1 week ago")
 - `--until=<date>` - commits before date
+- `--prompts` - show AI prompts attached to commits
+- `--agent` - show which AI agent made the commit
+- `--session` - show session transcript (first 20k bytes)
+- `--session-offset=N` - start session display at byte N
+- `--session-limit=N` - limit session display to N bytes
 - `-- <path>...` - filter to commits affecting paths
 
 ### git diff
@@ -110,34 +115,48 @@ Forks are git worktrees. The `.forks/` directory is auto-added to `.gitignore`.
 - `--pick` performs a proper git merge, preserving both base and fork history
 - `--promote` moves HEAD to the fork's commit, discarding any base-only commits (stash uncommitted changes first)
 
-### --prompt
+### --prompt (AI Attribution)
 
-Store the user prompt that created a commit:
+Store the user prompt and AI metadata with a commit:
 
 ```bash
 git commit -m "Add feature" --prompt "Add a logout button to the header"
-git log --prompts  # view prompts in log output
 ```
 
-### ZAGI_AGENT
+When `--prompt` is used, zagi stores metadata in git notes:
+- `refs/notes/agent` - detected AI agent (claude, opencode, cursor, etc.)
+- `refs/notes/prompt` - the user prompt text
+- `refs/notes/session` - full session transcript (Claude Code, OpenCode)
 
-Set `ZAGI_AGENT` to enable agent-specific features. The value can be any string describing your agent (e.g. `claude-code`, `cursor`, `aider`) - this will be used in future features for agent-specific behavior.
-
+View with log flags:
 ```bash
-export ZAGI_AGENT=claude-code
-git commit -m "x"  # error: --prompt required
+git log --prompts   # show prompts (truncated to 200 chars)
+git log --agent     # show agent name
+git log --session   # show session transcript (paginated)
+git log --session --session-limit=1000  # first 1000 bytes
+git log --session --session-offset=1000 # start at byte 1000
 ```
 
-When `ZAGI_AGENT` is set:
+Git notes are local by default and don't modify commit history.
+
+### Agent Mode
+
+Agent mode is automatically enabled when running inside AI tools:
+- Claude Code (`CLAUDECODE=1`)
+- OpenCode (`OPENCODE=1`)
+- VS Code, Cursor, Windsurf (detected from `VSCODE_GIT_ASKPASS_NODE`)
+
+You can also enable it manually:
+```bash
+export ZAGI_AGENT=my-agent
+```
+
+When agent mode is active:
 - `git commit` requires `--prompt` to record the user request
 - Destructive commands are blocked (guardrails)
 
-To prevent child processes from overriding `ZAGI_AGENT`, make it readonly:
-
 ```bash
-# bash/zsh
-export ZAGI_AGENT=claude-code
-readonly ZAGI_AGENT
+git commit -m "x"  # error: --prompt required in agent mode
 ```
 
 ### ZAGI_STRIP_COAUTHORS
