@@ -380,7 +380,8 @@ fn readClaudeEntriesAfter(
     };
     defer file.close();
 
-    const content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+    // Use a large limit - session files can grow to hundreds of MB
+    const content = file.readToEndAlloc(allocator, 500 * 1024 * 1024) catch {
         allocator.free(session_path);
         return null;
     };
@@ -454,90 +455,111 @@ fn readClaudeEntriesAfter(
     };
 }
 
-/// JSON structure for parsing session entries
-const JsonMessage = struct {
-    role: ?[]const u8 = null,
-    content: ?JsonContent = null,
-};
-
-const JsonContent = union(enum) {
-    string: []const u8,
-    array: []const JsonContentBlock,
-};
-
-const JsonContentBlock = struct {
-    type: ?[]const u8 = null,
-    text: ?[]const u8 = null,
-    name: ?[]const u8 = null,
-};
-
-const JsonEntry = struct {
-    uuid: ?[]const u8 = null,
-    timestamp: ?[]const u8 = null,
-    type: ?[]const u8 = null,
-    message: ?JsonMessage = null,
-};
-
 /// Parse a single JSONL line into a SessionEntry
+/// Uses std.json.Value for flexible content parsing (content can be string or array)
 fn parseJsonlEntry(allocator: std.mem.Allocator, line: []const u8) !SessionEntry {
-    const parsed = std.json.parseFromSlice(JsonEntry, allocator, line, .{
-        .ignore_unknown_fields = true,
-        .allocate = .alloc_always,
-    }) catch return error.ParseError;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return error.ParseError;
     defer parsed.deinit();
 
-    const entry = parsed.value;
+    const root = parsed.value;
+    if (root != .object) return error.ParseError;
+
+    const obj = root.object;
+
+    // Extract uuid (required)
+    const uuid_val = obj.get("uuid") orelse return error.MissingUuid;
+    const uuid = switch (uuid_val) {
+        .string => |s| s,
+        else => return error.MissingUuid,
+    };
+
+    // Extract timestamp (required)
+    const timestamp_val = obj.get("timestamp") orelse return error.MissingTimestamp;
+    const timestamp = switch (timestamp_val) {
+        .string => |s| s,
+        else => return error.MissingTimestamp,
+    };
+
+    // Extract type
+    const entry_type_val = obj.get("type");
+    const entry_type = if (entry_type_val) |v| switch (v) {
+        .string => |s| s,
+        else => "unknown",
+    } else "unknown";
 
     // Extract content from message
     var content_text: ?[]const u8 = null;
     var role: ?[]const u8 = null;
     var tool_name: ?[]const u8 = null;
 
-    if (entry.message) |msg| {
-        if (msg.role) |r| {
-            role = try allocator.dupe(u8, r);
-        }
-        if (msg.content) |c| {
-            switch (c) {
-                .string => |s| {
-                    // Truncate long content
-                    const max_len: usize = 2000;
-                    if (s.len > max_len) {
-                        content_text = try allocator.dupe(u8, s[0..max_len]);
-                    } else {
-                        content_text = try allocator.dupe(u8, s);
-                    }
-                },
-                .array => |blocks| {
-                    // Find text content in array
-                    for (blocks) |block| {
-                        if (block.type) |t| {
-                            if (std.mem.eql(u8, t, "text")) {
-                                if (block.text) |text| {
-                                    const max_len: usize = 2000;
-                                    if (text.len > max_len) {
-                                        content_text = try allocator.dupe(u8, text[0..max_len]);
-                                    } else {
-                                        content_text = try allocator.dupe(u8, text);
+    if (obj.get("message")) |msg_val| {
+        if (msg_val == .object) {
+            const msg = msg_val.object;
+
+            // Get role
+            if (msg.get("role")) |role_val| {
+                if (role_val == .string) {
+                    role = try allocator.dupe(u8, role_val.string);
+                }
+            }
+
+            // Get content (can be string or array)
+            if (msg.get("content")) |content_val| {
+                switch (content_val) {
+                    .string => |s| {
+                        // User messages typically have string content
+                        const max_len: usize = 2000;
+                        if (s.len > max_len) {
+                            content_text = try allocator.dupe(u8, s[0..max_len]);
+                        } else {
+                            content_text = try allocator.dupe(u8, s);
+                        }
+                    },
+                    .array => |blocks| {
+                        // Assistant messages have array of content blocks
+                        for (blocks.items) |block_val| {
+                            if (block_val != .object) continue;
+                            const block = block_val.object;
+
+                            // Get block type
+                            const block_type_val = block.get("type") orelse continue;
+                            if (block_type_val != .string) continue;
+                            const block_type = block_type_val.string;
+
+                            if (std.mem.eql(u8, block_type, "text")) {
+                                // Extract text content
+                                if (block.get("text")) |text_val| {
+                                    if (text_val == .string) {
+                                        const text = text_val.string;
+                                        const max_len: usize = 2000;
+                                        if (text.len > max_len) {
+                                            content_text = try allocator.dupe(u8, text[0..max_len]);
+                                        } else {
+                                            content_text = try allocator.dupe(u8, text);
+                                        }
+                                        break;
                                     }
-                                    break;
                                 }
-                            } else if (std.mem.eql(u8, t, "tool_use")) {
-                                if (block.name) |n| {
-                                    tool_name = try allocator.dupe(u8, n);
+                            } else if (std.mem.eql(u8, block_type, "tool_use")) {
+                                // Extract tool name
+                                if (block.get("name")) |name_val| {
+                                    if (name_val == .string) {
+                                        tool_name = try allocator.dupe(u8, name_val.string);
+                                    }
                                 }
                             }
                         }
-                    }
-                },
+                    },
+                    else => {},
+                }
             }
         }
     }
 
     return SessionEntry{
-        .uuid = try allocator.dupe(u8, entry.uuid orelse return error.MissingUuid),
-        .timestamp = try allocator.dupe(u8, entry.timestamp orelse return error.MissingTimestamp),
-        .entry_type = try allocator.dupe(u8, entry.type orelse "unknown"),
+        .uuid = try allocator.dupe(u8, uuid),
+        .timestamp = try allocator.dupe(u8, timestamp),
+        .entry_type = try allocator.dupe(u8, entry_type),
         .role = role,
         .content = content_text,
         .tool_name = tool_name,
