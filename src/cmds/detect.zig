@@ -696,6 +696,8 @@ fn formatTimestamp(timestamp: []const u8) [5]u8 {
 }
 
 // Tests
+const testing = std.testing;
+
 test "isAgentMode returns false when no env vars set" {
     // Note: This test assumes env vars are not set in test environment
     // In practice, we can't easily unset env vars in Zig tests
@@ -707,4 +709,386 @@ test "detectAgent returns based on env vars" {
     const agent = detectAgent();
     // Without mocking, this will return based on actual env
     _ = agent.name();
+}
+
+// ============================================================================
+// parseJsonlEntry tests
+// ============================================================================
+
+test "parseJsonlEntry parses user message with string content" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"uuid":"abc-123","timestamp":"2026-01-09T13:18:32.503Z","type":"user","message":{"role":"user","content":"Hello world"}}
+    ;
+
+    const entry = try parseJsonlEntry(allocator, jsonl);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("abc-123", entry.uuid);
+    try testing.expectEqualStrings("2026-01-09T13:18:32.503Z", entry.timestamp);
+    try testing.expectEqualStrings("user", entry.entry_type);
+    try testing.expectEqualStrings("user", entry.role.?);
+    try testing.expectEqualStrings("Hello world", entry.content.?);
+    try testing.expect(entry.tool_name == null);
+}
+
+test "parseJsonlEntry parses assistant message with text block" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"uuid":"def-456","timestamp":"2026-01-09T13:19:00.000Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I can help with that."}]}}
+    ;
+
+    const entry = try parseJsonlEntry(allocator, jsonl);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("def-456", entry.uuid);
+    try testing.expectEqualStrings("assistant", entry.entry_type);
+    try testing.expectEqualStrings("assistant", entry.role.?);
+    try testing.expectEqualStrings("I can help with that.", entry.content.?);
+}
+
+test "parseJsonlEntry parses assistant message with tool_use block" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"uuid":"ghi-789","timestamp":"2026-01-09T13:20:00.000Z","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"path":"/test.txt"}}]}}
+    ;
+
+    const entry = try parseJsonlEntry(allocator, jsonl);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("ghi-789", entry.uuid);
+    try testing.expectEqualStrings("Read", entry.tool_name.?);
+    try testing.expect(entry.content == null);
+}
+
+test "parseJsonlEntry captures first text block and stops (text before tool)" {
+    const allocator = testing.allocator;
+    // When text comes before tool_use, only text is captured (implementation breaks after text)
+    const jsonl =
+        \\{"uuid":"jkl-012","timestamp":"2026-01-09T13:21:00.000Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me read that file."},{"type":"tool_use","name":"Read","input":{}}]}}
+    ;
+
+    const entry = try parseJsonlEntry(allocator, jsonl);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    // First text block should be captured, then break happens
+    try testing.expectEqualStrings("Let me read that file.", entry.content.?);
+    // Tool name not captured because break happens after text block
+    try testing.expect(entry.tool_name == null);
+}
+
+test "parseJsonlEntry captures tool when it comes before text" {
+    const allocator = testing.allocator;
+    // When tool_use comes before text, tool is captured, then text is captured (and breaks)
+    const jsonl =
+        \\{"uuid":"mno-345","timestamp":"2026-01-09T13:21:30.000Z","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Write","input":{}},{"type":"text","text":"Done writing."}]}}
+    ;
+
+    const entry = try parseJsonlEntry(allocator, jsonl);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    // Tool name is captured first
+    try testing.expectEqualStrings("Write", entry.tool_name.?);
+    // Then text is captured (and breaks)
+    try testing.expectEqualStrings("Done writing.", entry.content.?);
+}
+
+test "parseJsonlEntry returns error on missing uuid" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"timestamp":"2026-01-09T13:18:32.503Z","type":"user"}
+    ;
+
+    try testing.expectError(error.MissingUuid, parseJsonlEntry(allocator, jsonl));
+}
+
+test "parseJsonlEntry returns error on missing timestamp" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"uuid":"abc-123","type":"user"}
+    ;
+
+    try testing.expectError(error.MissingTimestamp, parseJsonlEntry(allocator, jsonl));
+}
+
+test "parseJsonlEntry returns error on invalid json" {
+    const allocator = testing.allocator;
+    const jsonl = "not valid json";
+
+    try testing.expectError(error.ParseError, parseJsonlEntry(allocator, jsonl));
+}
+
+test "parseJsonlEntry handles entry without message field" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"uuid":"xyz-999","timestamp":"2026-01-09T13:22:00.000Z","type":"summary"}
+    ;
+
+    const entry = try parseJsonlEntry(allocator, jsonl);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("xyz-999", entry.uuid);
+    try testing.expectEqualStrings("summary", entry.entry_type);
+    try testing.expect(entry.role == null);
+    try testing.expect(entry.content == null);
+}
+
+test "parseJsonlEntry truncates long content to 2000 chars" {
+    const allocator = testing.allocator;
+
+    // Create content longer than 2000 chars
+    var long_content: [2500]u8 = undefined;
+    for (&long_content) |*c| {
+        c.* = 'a';
+    }
+
+    var json_buf: [3000]u8 = undefined;
+    const json_str = std.fmt.bufPrint(&json_buf, "{{\"uuid\":\"long-001\",\"timestamp\":\"2026-01-09T13:23:00.000Z\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{s}\"}}}}", .{long_content}) catch unreachable;
+
+    const entry = try parseJsonlEntry(allocator, json_str);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expect(entry.content.?.len == 2000);
+}
+
+// ============================================================================
+// formatTimestamp tests
+// ============================================================================
+
+test "formatTimestamp extracts HH:MM from ISO timestamp" {
+    const result = formatTimestamp("2026-01-09T13:18:32.503Z");
+    try testing.expectEqualStrings("13:18", &result);
+}
+
+test "formatTimestamp handles midnight" {
+    const result = formatTimestamp("2026-01-09T00:00:00.000Z");
+    try testing.expectEqualStrings("00:00", &result);
+}
+
+test "formatTimestamp handles end of day" {
+    const result = formatTimestamp("2026-01-09T23:59:59.999Z");
+    try testing.expectEqualStrings("23:59", &result);
+}
+
+test "formatTimestamp returns placeholder for short string" {
+    const result = formatTimestamp("short");
+    try testing.expectEqualStrings("??:??", &result);
+}
+
+test "formatTimestamp returns placeholder for empty string" {
+    const result = formatTimestamp("");
+    try testing.expectEqualStrings("??:??", &result);
+}
+
+// ============================================================================
+// formatSessionMarkdown tests
+// ============================================================================
+
+test "formatSessionMarkdown returns no activity message for empty entries" {
+    const allocator = testing.allocator;
+    const entries: []const SessionEntry = &[_]SessionEntry{};
+
+    const result = try formatSessionMarkdown(allocator, entries);
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("_No new session activity_", result);
+}
+
+test "formatSessionMarkdown formats single user message" {
+    const allocator = testing.allocator;
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:30:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "Hello there",
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    // Check for expected structure
+    try testing.expect(std.mem.indexOf(u8, result, "<details>") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "</details>") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "1 user, 0 assistant") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "### User _10:30_") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "Hello there") != null);
+}
+
+test "formatSessionMarkdown formats user and assistant messages" {
+    const allocator = testing.allocator;
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:30:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "What is 2+2?",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-2",
+            .timestamp = "2026-01-09T10:31:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = "2+2 equals 4.",
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    try testing.expect(std.mem.indexOf(u8, result, "1 user, 1 assistant") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "### User _10:30_") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "### Assistant _10:31_") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "What is 2+2?") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "2+2 equals 4.") != null);
+}
+
+test "formatSessionMarkdown includes tool count in summary" {
+    const allocator = testing.allocator;
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:30:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "Read the file",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-2",
+            .timestamp = "2026-01-09T10:31:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = null,
+            .tool_name = "Read",
+        },
+        .{
+            .uuid = "uuid-3",
+            .timestamp = "2026-01-09T10:32:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = "Here is the file content.",
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    try testing.expect(std.mem.indexOf(u8, result, "1 tools") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "**Tools:** Read") != null);
+}
+
+test "formatSessionMarkdown shows time range in header" {
+    const allocator = testing.allocator;
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T09:00:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "First message",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-2",
+            .timestamp = "2026-01-09T11:30:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = "Last message",
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    // Should show time range from first to last entry
+    try testing.expect(std.mem.indexOf(u8, result, "09:00 - 11:30") != null);
+}
+
+test "formatSessionMarkdown adds ellipsis for truncated content" {
+    const allocator = testing.allocator;
+
+    // Content exactly 2000 chars (will have ellipsis added)
+    var content_2000: [2000]u8 = undefined;
+    for (&content_2000) |*c| {
+        c.* = 'x';
+    }
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:30:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = &content_2000,
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    // Should have ellipsis after the 2000-char content
+    try testing.expect(std.mem.indexOf(u8, result, "...") != null);
 }
