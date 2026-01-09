@@ -1799,3 +1799,145 @@ test "parseOpenCodeMessage handles missing time field" {
     // Should use default timestamp when time is missing
     try testing.expectEqualStrings("1970-01-01T00:00:00.000Z", entry.timestamp);
 }
+
+test "parseOpenCodeMessage handles string timestamp fallback" {
+    const allocator = testing.allocator;
+    // String timestamps (quoted numbers) are not parsed as numbers by Zig's JSON parser
+    // and should fall through to default timestamp
+    const msg_json =
+        \\{"id":"msg_strtime","sessionID":"ses_abc","role":"assistant","time":{"created":"1767976376094"}}
+    ;
+
+    const entry = try parseOpenCodeMessage(allocator, "/nonexistent", msg_json);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("msg_strtime", entry.uuid);
+    // String timestamps fall back to default (not parsed as numbers)
+    try testing.expectEqualStrings("1970-01-01T00:00:00.000Z", entry.timestamp);
+}
+
+test "parseOpenCodeMessage handles empty time object" {
+    const allocator = testing.allocator;
+    const msg_json =
+        \\{"id":"msg_emptytime","sessionID":"ses_abc","role":"user","time":{}}
+    ;
+
+    const entry = try parseOpenCodeMessage(allocator, "/nonexistent", msg_json);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("msg_emptytime", entry.uuid);
+    // Should use default timestamp when created field is missing
+    try testing.expectEqualStrings("1970-01-01T00:00:00.000Z", entry.timestamp);
+}
+
+test "parseOpenCodeMessage handles extra fields gracefully" {
+    const allocator = testing.allocator;
+    const msg_json =
+        \\{"id":"msg_extra","sessionID":"ses_abc","role":"user","time":{"created":1767976376094},"model":"claude-3-opus","tokens":1234,"unknown_field":"ignored"}
+    ;
+
+    const entry = try parseOpenCodeMessage(allocator, "/nonexistent", msg_json);
+    defer {
+        allocator.free(entry.uuid);
+        allocator.free(entry.timestamp);
+        allocator.free(entry.entry_type);
+        if (entry.role) |r| allocator.free(r);
+        if (entry.content) |c| allocator.free(c);
+        if (entry.tool_name) |t| allocator.free(t);
+    }
+
+    try testing.expectEqualStrings("msg_extra", entry.uuid);
+    try testing.expectEqualStrings("user", entry.role.?);
+}
+
+// ============================================================================
+// convertJsonlToArray tests
+// ============================================================================
+
+test "convertJsonlToArray converts single line" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"key":"value"}
+    ;
+
+    const result = try convertJsonlToArray(allocator, jsonl);
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("[{\"key\":\"value\"}]", result);
+}
+
+test "convertJsonlToArray converts multiple lines" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"a":1}
+        \\{"b":2}
+        \\{"c":3}
+    ;
+
+    const result = try convertJsonlToArray(allocator, jsonl);
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("[{\"a\":1},{\"b\":2},{\"c\":3}]", result);
+}
+
+test "convertJsonlToArray handles empty input" {
+    const allocator = testing.allocator;
+    const jsonl = "";
+
+    const result = try convertJsonlToArray(allocator, jsonl);
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("[]", result);
+}
+
+test "convertJsonlToArray handles blank lines" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"first":1}
+        \\
+        \\{"second":2}
+        \\
+        \\{"third":3}
+    ;
+
+    const result = try convertJsonlToArray(allocator, jsonl);
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("[{\"first\":1},{\"second\":2},{\"third\":3}]", result);
+}
+
+test "convertJsonlToArray handles trailing newline" {
+    const allocator = testing.allocator;
+    const jsonl = "{\"key\":\"value\"}\n";
+
+    const result = try convertJsonlToArray(allocator, jsonl);
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("[{\"key\":\"value\"}]", result);
+}
+
+test "convertJsonlToArray preserves json structure" {
+    const allocator = testing.allocator;
+    const jsonl =
+        \\{"nested":{"inner":"value"},"array":[1,2,3]}
+    ;
+
+    const result = try convertJsonlToArray(allocator, jsonl);
+    defer allocator.free(result);
+
+    try testing.expectEqualStrings("[{\"nested\":{\"inner\":\"value\"},\"array\":[1,2,3]}]", result);
+}
