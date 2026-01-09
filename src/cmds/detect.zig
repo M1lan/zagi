@@ -1092,3 +1092,245 @@ test "formatSessionMarkdown adds ellipsis for truncated content" {
     // Should have ellipsis after the 2000-char content
     try testing.expect(std.mem.indexOf(u8, result, "...") != null);
 }
+
+test "formatSessionMarkdown handles multiple tools in sequence" {
+    const allocator = testing.allocator;
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:30:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "Edit these files",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-2",
+            .timestamp = "2026-01-09T10:31:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = null,
+            .tool_name = "Read",
+        },
+        .{
+            .uuid = "uuid-3",
+            .timestamp = "2026-01-09T10:31:30.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = null,
+            .tool_name = "Edit",
+        },
+        .{
+            .uuid = "uuid-4",
+            .timestamp = "2026-01-09T10:32:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = null,
+            .tool_name = "Write",
+        },
+        .{
+            .uuid = "uuid-5",
+            .timestamp = "2026-01-09T10:33:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "Thanks",
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    // Should show "3 tools" in summary
+    try testing.expect(std.mem.indexOf(u8, result, "3 tools") != null);
+    // Should list all tools before the next user message
+    try testing.expect(std.mem.indexOf(u8, result, "**Tools:** Read, Edit, Write") != null);
+}
+
+test "formatSessionMarkdown handles messages with null content" {
+    const allocator = testing.allocator;
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:30:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = null, // No content
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-2",
+            .timestamp = "2026-01-09T10:31:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = null, // No content
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    // Should still produce valid markdown structure
+    try testing.expect(std.mem.indexOf(u8, result, "<details>") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "</details>") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "### User _10:30_") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "### Assistant _10:31_") != null);
+}
+
+test "formatSessionMarkdown skips entries without role" {
+    const allocator = testing.allocator;
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:30:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "Hello",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-2",
+            .timestamp = "2026-01-09T10:31:00.000Z",
+            .entry_type = "summary", // Internal type with no role
+            .role = null,
+            .content = "Summary content",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-3",
+            .timestamp = "2026-01-09T10:32:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = "Goodbye",
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    // Should only count messages with roles
+    try testing.expect(std.mem.indexOf(u8, result, "1 user, 1 assistant") != null);
+    // Summary content should NOT appear (no role means entry is skipped)
+    try testing.expect(std.mem.indexOf(u8, result, "Summary content") == null);
+}
+
+test "formatSessionMarkdown handles interleaved conversation" {
+    const allocator = testing.allocator;
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:00:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "Question 1",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-2",
+            .timestamp = "2026-01-09T10:01:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = "Answer 1",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-3",
+            .timestamp = "2026-01-09T10:02:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "Question 2",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-4",
+            .timestamp = "2026-01-09T10:03:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = "Answer 2",
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    // Should count correctly
+    try testing.expect(std.mem.indexOf(u8, result, "2 user, 2 assistant") != null);
+
+    // Check order is preserved (Question 1 appears before Answer 1, etc.)
+    const q1_pos = std.mem.indexOf(u8, result, "Question 1").?;
+    const a1_pos = std.mem.indexOf(u8, result, "Answer 1").?;
+    const q2_pos = std.mem.indexOf(u8, result, "Question 2").?;
+    const a2_pos = std.mem.indexOf(u8, result, "Answer 2").?;
+
+    try testing.expect(q1_pos < a1_pos);
+    try testing.expect(a1_pos < q2_pos);
+    try testing.expect(q2_pos < a2_pos);
+}
+
+test "formatSessionMarkdown flushes tools at end of entries" {
+    const allocator = testing.allocator;
+
+    // Conversation ends with tool usage (no subsequent user message to trigger flush)
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:30:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "Do something",
+            .tool_name = null,
+        },
+        .{
+            .uuid = "uuid-2",
+            .timestamp = "2026-01-09T10:31:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = null,
+            .tool_name = "Bash",
+        },
+        .{
+            .uuid = "uuid-3",
+            .timestamp = "2026-01-09T10:32:00.000Z",
+            .entry_type = "assistant",
+            .role = "assistant",
+            .content = null,
+            .tool_name = "Read",
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    // Tools should be flushed at end
+    try testing.expect(std.mem.indexOf(u8, result, "**Tools:** Bash, Read") != null);
+}
+
+test "formatSessionMarkdown handles content less than 2000 chars without ellipsis" {
+    const allocator = testing.allocator;
+
+    var entries = [_]SessionEntry{
+        .{
+            .uuid = "uuid-1",
+            .timestamp = "2026-01-09T10:30:00.000Z",
+            .entry_type = "user",
+            .role = "user",
+            .content = "Short content",
+            .tool_name = null,
+        },
+    };
+
+    const result = try formatSessionMarkdown(allocator, &entries);
+    defer allocator.free(result);
+
+    // Should NOT have ellipsis for short content
+    try testing.expect(std.mem.indexOf(u8, result, "Short content") != null);
+    // Check that we don't have "Short content..." (with ellipsis)
+    try testing.expect(std.mem.indexOf(u8, result, "Short content...") == null);
+}
