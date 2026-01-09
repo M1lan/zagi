@@ -244,6 +244,388 @@ fn readOpenCodeSession(allocator: std.mem.Allocator) ?Session {
     return null;
 }
 
+// ============================================================================
+// Session Checkpoint Support - Structured JSONL Parsing & Markdown Formatting
+// ============================================================================
+
+/// Parsed session entry for checkpoint tracking
+pub const SessionEntry = struct {
+    uuid: []const u8,
+    timestamp: []const u8,
+    entry_type: []const u8, // "user", "assistant", "tool_result", etc.
+    role: ?[]const u8, // "user" or "assistant" for message types
+    content: ?[]const u8, // message content (may be truncated)
+    tool_name: ?[]const u8, // for tool_use entries
+};
+
+/// Result of reading session entries
+pub const SessionEntriesResult = struct {
+    entries: []SessionEntry,
+    last_uuid: ?[]const u8, // UUID of last entry (for checkpoint)
+    session_path: []const u8,
+};
+
+/// Read session entries after a checkpoint UUID (or all if null)
+/// Returns structured entries for markdown formatting
+pub fn readSessionEntriesAfter(
+    allocator: std.mem.Allocator,
+    agent: Agent,
+    cwd: []const u8,
+    after_uuid: ?[]const u8,
+) ?SessionEntriesResult {
+    return switch (agent) {
+        .claude => readClaudeEntriesAfter(allocator, cwd, after_uuid),
+        // TODO: .opencode => readOpenCodeEntriesAfter(allocator, after_uuid),
+        else => null,
+    };
+}
+
+/// Read Claude Code session entries after a checkpoint
+fn readClaudeEntriesAfter(
+    allocator: std.mem.Allocator,
+    cwd: []const u8,
+    after_uuid: ?[]const u8,
+) ?SessionEntriesResult {
+    const home = std.posix.getenv("HOME") orelse return null;
+
+    // Convert cwd to project hash
+    var project_hash_buf: [512]u8 = undefined;
+    var hash_len: usize = 0;
+    for (cwd) |char| {
+        if (hash_len >= project_hash_buf.len) break;
+        project_hash_buf[hash_len] = if (char == '/') '-' else char;
+        hash_len += 1;
+    }
+    const project_hash = project_hash_buf[0..hash_len];
+
+    // Build project directory path
+    const project_dir = std.fmt.allocPrint(allocator, "{s}/.claude/projects/{s}", .{ home, project_hash }) catch return null;
+    defer allocator.free(project_dir);
+
+    // Find most recent .jsonl file
+    var dir = std.fs.cwd().openDir(project_dir, .{ .iterate = true }) catch return null;
+    defer dir.close();
+
+    var most_recent_path: ?[]const u8 = null;
+    var most_recent_mtime: i128 = 0;
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+
+        const stat = dir.statFile(entry.name) catch continue;
+        const mtime = stat.mtime;
+
+        if (most_recent_path == null or mtime > most_recent_mtime) {
+            if (most_recent_path) |old| allocator.free(old);
+            most_recent_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_dir, entry.name }) catch continue;
+            most_recent_mtime = mtime;
+        }
+    }
+
+    const session_path = most_recent_path orelse return null;
+
+    // Read file content
+    const file = std.fs.cwd().openFile(session_path, .{}) catch {
+        allocator.free(session_path);
+        return null;
+    };
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+        allocator.free(session_path);
+        return null;
+    };
+    defer allocator.free(content);
+
+    // Parse JSONL lines into entries
+    var entries = std.array_list.ArrayListAligned(SessionEntry, null).init(allocator);
+    var found_checkpoint = after_uuid == null; // If no checkpoint, include all
+    var last_uuid: ?[]const u8 = null;
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+
+        const entry = parseJsonlEntry(allocator, trimmed) catch continue;
+
+        // Check if we've passed the checkpoint
+        if (!found_checkpoint) {
+            if (after_uuid) |checkpoint| {
+                if (std.mem.eql(u8, entry.uuid, checkpoint)) {
+                    found_checkpoint = true;
+                }
+            }
+            // Free entry since we're skipping it
+            allocator.free(entry.uuid);
+            allocator.free(entry.timestamp);
+            allocator.free(entry.entry_type);
+            if (entry.role) |r| allocator.free(r);
+            if (entry.content) |c| allocator.free(c);
+            if (entry.tool_name) |t| allocator.free(t);
+            continue;
+        }
+
+        // Skip internal entry types
+        if (std.mem.eql(u8, entry.entry_type, "summary") or
+            std.mem.eql(u8, entry.entry_type, "queue-operation"))
+        {
+            allocator.free(entry.uuid);
+            allocator.free(entry.timestamp);
+            allocator.free(entry.entry_type);
+            if (entry.role) |r| allocator.free(r);
+            if (entry.content) |c| allocator.free(c);
+            if (entry.tool_name) |t| allocator.free(t);
+            continue;
+        }
+
+        // Track last UUID for checkpoint
+        if (last_uuid) |old| allocator.free(old);
+        last_uuid = allocator.dupe(u8, entry.uuid) catch null;
+
+        entries.append(entry) catch continue;
+    }
+
+    if (entries.items.len == 0) {
+        entries.deinit();
+        if (last_uuid) |u| allocator.free(u);
+        allocator.free(session_path);
+        return null;
+    }
+
+    return SessionEntriesResult{
+        .entries = entries.toOwnedSlice() catch {
+            entries.deinit();
+            if (last_uuid) |u| allocator.free(u);
+            allocator.free(session_path);
+            return null;
+        },
+        .last_uuid = last_uuid,
+        .session_path = session_path,
+    };
+}
+
+/// JSON structure for parsing session entries
+const JsonMessage = struct {
+    role: ?[]const u8 = null,
+    content: ?JsonContent = null,
+};
+
+const JsonContent = union(enum) {
+    string: []const u8,
+    array: []const JsonContentBlock,
+};
+
+const JsonContentBlock = struct {
+    type: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+};
+
+const JsonEntry = struct {
+    uuid: ?[]const u8 = null,
+    timestamp: ?[]const u8 = null,
+    type: ?[]const u8 = null,
+    message: ?JsonMessage = null,
+};
+
+/// Parse a single JSONL line into a SessionEntry
+fn parseJsonlEntry(allocator: std.mem.Allocator, line: []const u8) !SessionEntry {
+    const parsed = std.json.parseFromSlice(JsonEntry, allocator, line, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    }) catch return error.ParseError;
+    defer parsed.deinit();
+
+    const entry = parsed.value;
+
+    // Extract content from message
+    var content_text: ?[]const u8 = null;
+    var role: ?[]const u8 = null;
+    var tool_name: ?[]const u8 = null;
+
+    if (entry.message) |msg| {
+        if (msg.role) |r| {
+            role = try allocator.dupe(u8, r);
+        }
+        if (msg.content) |c| {
+            switch (c) {
+                .string => |s| {
+                    // Truncate long content
+                    const max_len: usize = 2000;
+                    if (s.len > max_len) {
+                        content_text = try allocator.dupe(u8, s[0..max_len]);
+                    } else {
+                        content_text = try allocator.dupe(u8, s);
+                    }
+                },
+                .array => |blocks| {
+                    // Find text content in array
+                    for (blocks) |block| {
+                        if (block.type) |t| {
+                            if (std.mem.eql(u8, t, "text")) {
+                                if (block.text) |text| {
+                                    const max_len: usize = 2000;
+                                    if (text.len > max_len) {
+                                        content_text = try allocator.dupe(u8, text[0..max_len]);
+                                    } else {
+                                        content_text = try allocator.dupe(u8, text);
+                                    }
+                                    break;
+                                }
+                            } else if (std.mem.eql(u8, t, "tool_use")) {
+                                if (block.name) |n| {
+                                    tool_name = try allocator.dupe(u8, n);
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    return SessionEntry{
+        .uuid = try allocator.dupe(u8, entry.uuid orelse return error.MissingUuid),
+        .timestamp = try allocator.dupe(u8, entry.timestamp orelse return error.MissingTimestamp),
+        .entry_type = try allocator.dupe(u8, entry.type orelse "unknown"),
+        .role = role,
+        .content = content_text,
+        .tool_name = tool_name,
+    };
+}
+
+/// Format session entries as GitHub-flavored markdown
+pub fn formatSessionMarkdown(
+    allocator: std.mem.Allocator,
+    entries: []const SessionEntry,
+) ![]const u8 {
+    if (entries.len == 0) {
+        return try allocator.dupe(u8, "_No new session activity_");
+    }
+
+    var result = std.array_list.ArrayListAligned(u8, null).init(allocator);
+    errdefer result.deinit();
+
+    // Get time range from first and last entries
+    const first_time = formatTimestamp(entries[0].timestamp);
+    const last_time = formatTimestamp(entries[entries.len - 1].timestamp);
+
+    // Count message types for summary
+    var user_count: usize = 0;
+    var assistant_count: usize = 0;
+    var tool_count: usize = 0;
+    for (entries) |entry| {
+        if (entry.role) |role| {
+            if (std.mem.eql(u8, role, "user")) {
+                user_count += 1;
+            } else if (std.mem.eql(u8, role, "assistant")) {
+                assistant_count += 1;
+            }
+        }
+        if (entry.tool_name != null) {
+            tool_count += 1;
+        }
+    }
+
+    // Write header
+    try result.appendSlice("<details>\n<summary>Session (");
+    var count_buf: [32]u8 = undefined;
+    const count_str = std.fmt.bufPrint(&count_buf, "{d} user, {d} assistant", .{ user_count, assistant_count }) catch "messages";
+    try result.appendSlice(count_str);
+    if (tool_count > 0) {
+        const tool_str = std.fmt.bufPrint(&count_buf, ", {d} tools", .{tool_count}) catch "";
+        try result.appendSlice(tool_str);
+    }
+    try result.appendSlice(" | ");
+    try result.appendSlice(&first_time);
+    try result.appendSlice(" - ");
+    try result.appendSlice(&last_time);
+    try result.appendSlice(")</summary>\n\n");
+
+    // Write each entry
+    var current_tools = std.array_list.ArrayListAligned([]const u8, null).init(allocator);
+    defer current_tools.deinit();
+
+    for (entries) |entry| {
+        // Collect tool names for assistant messages
+        if (entry.tool_name) |tool| {
+            current_tools.append(tool) catch {};
+            continue;
+        }
+
+        if (entry.role) |role| {
+            const time_str = formatTimestamp(entry.timestamp);
+
+            if (std.mem.eql(u8, role, "user")) {
+                // Flush any pending tools before user message
+                if (current_tools.items.len > 0) {
+                    try result.appendSlice("**Tools:** ");
+                    for (current_tools.items, 0..) |tool, i| {
+                        if (i > 0) try result.appendSlice(", ");
+                        try result.appendSlice(tool);
+                    }
+                    try result.appendSlice("\n\n");
+                    current_tools.clearRetainingCapacity();
+                }
+
+                try result.appendSlice("### User _");
+                try result.appendSlice(&time_str);
+                try result.appendSlice("_\n");
+                if (entry.content) |content| {
+                    try result.appendSlice(content);
+                    if (content.len == 2000) {
+                        try result.appendSlice("...");
+                    }
+                }
+                try result.appendSlice("\n\n");
+            } else if (std.mem.eql(u8, role, "assistant")) {
+                try result.appendSlice("### Assistant _");
+                try result.appendSlice(&time_str);
+                try result.appendSlice("_\n");
+                if (entry.content) |content| {
+                    try result.appendSlice(content);
+                    if (content.len == 2000) {
+                        try result.appendSlice("...");
+                    }
+                }
+                try result.appendSlice("\n\n");
+            }
+        }
+    }
+
+    // Flush any remaining tools
+    if (current_tools.items.len > 0) {
+        try result.appendSlice("**Tools:** ");
+        for (current_tools.items, 0..) |tool, i| {
+            if (i > 0) try result.appendSlice(", ");
+            try result.appendSlice(tool);
+        }
+        try result.appendSlice("\n\n");
+    }
+
+    try result.appendSlice("</details>");
+
+    return result.toOwnedSlice();
+}
+
+/// Format ISO timestamp to short time string (HH:MM)
+fn formatTimestamp(timestamp: []const u8) [5]u8 {
+    // ISO format: 2026-01-09T13:18:32.503Z
+    // Extract HH:MM starting at position 11
+    var result: [5]u8 = "??:??".*;
+    if (timestamp.len >= 16) {
+        result[0] = timestamp[11];
+        result[1] = timestamp[12];
+        result[2] = ':';
+        result[3] = timestamp[14];
+        result[4] = timestamp[15];
+    }
+    return result;
+}
+
 // Tests
 test "isAgentMode returns false when no env vars set" {
     // Note: This test assumes env vars are not set in test environment
