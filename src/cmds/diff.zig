@@ -101,7 +101,7 @@ fn getMergeBaseTree(repo: ?*c.git_repository, spec1: []const u8, spec2: []const 
 const MAX_PATHSPECS = 16;
 
 pub fn run(_: std.mem.Allocator, args: [][:0]u8) DiffError!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Parse args
     var staged = false;
@@ -261,14 +261,14 @@ pub fn run(_: std.mem.Allocator, args: [][:0]u8) DiffError!void {
 }
 
 const PrintState = struct {
-    stdout: std.fs.File.DeprecatedWriter,
+    stdout: std.fs.File.Writer,
     current_file: ?[]const u8,
     current_hunk_start: u32,
     current_hunk_end: u32,
     had_output: bool,
 };
 
-fn printStat(diff: ?*c.git_diff, stdout: std.fs.File.DeprecatedWriter) void {
+fn printStat(diff: ?*c.git_diff, stdout: std.fs.File.Writer) void {
     const num_deltas = c.git_diff_num_deltas(diff);
     if (num_deltas == 0) {
         stdout.print("no changes\n", .{}) catch {};
@@ -329,7 +329,7 @@ fn printStat(diff: ?*c.git_diff, stdout: std.fs.File.DeprecatedWriter) void {
     stdout.print("\n", .{}) catch {};
 }
 
-fn printNameOnly(diff: ?*c.git_diff, stdout: std.fs.File.DeprecatedWriter) void {
+fn printNameOnly(diff: ?*c.git_diff, stdout: std.fs.File.Writer) void {
     const num_deltas = c.git_diff_num_deltas(diff);
     if (num_deltas == 0) {
         stdout.print("no changes\n", .{}) catch {};
@@ -492,7 +492,7 @@ pub fn parseRevSpec(spec: []const u8) struct { old: []const u8, new: ?[]const u8
 const testing = std.testing;
 
 test "formatHunkHeader single line" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatHunkHeader(output.writer(), "src/main.zig", 42, 1);
@@ -501,7 +501,7 @@ test "formatHunkHeader single line" {
 }
 
 test "formatHunkHeader multiple lines" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatHunkHeader(output.writer(), "src/main.zig", 10, 5);
@@ -510,7 +510,7 @@ test "formatHunkHeader multiple lines" {
 }
 
 test "formatHunkHeader line range at line 1" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatHunkHeader(output.writer(), "README.md", 1, 3);
@@ -519,7 +519,7 @@ test "formatHunkHeader line range at line 1" {
 }
 
 test "formatDiffLine addition" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatDiffLine(output.writer(), true, "const x = 42;");
@@ -528,7 +528,7 @@ test "formatDiffLine addition" {
 }
 
 test "formatDiffLine deletion" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatDiffLine(output.writer(), false, "const x = 0;");
@@ -537,7 +537,7 @@ test "formatDiffLine deletion" {
 }
 
 test "formatDiffLine trims trailing newline" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatDiffLine(output.writer(), true, "hello world\n");
@@ -546,7 +546,7 @@ test "formatDiffLine trims trailing newline" {
 }
 
 test "formatDiffLine trims trailing CRLF" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatDiffLine(output.writer(), false, "windows line\r\n");
@@ -555,7 +555,7 @@ test "formatDiffLine trims trailing CRLF" {
 }
 
 test "formatNoChanges" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatNoChanges(output.writer());
@@ -622,7 +622,7 @@ test "parseRevSpec distinguishes double and triple dots" {
 }
 
 test "formatStatLine with additions only" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStatLine(output.writer(), "src/main.zig", 5, 0);
@@ -631,7 +631,7 @@ test "formatStatLine with additions only" {
 }
 
 test "formatStatLine with deletions only" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStatLine(output.writer(), "old.txt", 0, 3);
@@ -640,7 +640,7 @@ test "formatStatLine with deletions only" {
 }
 
 test "formatStatLine with mixed changes" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStatLine(output.writer(), "file.ts", 2, 2);
@@ -649,7 +649,7 @@ test "formatStatLine with mixed changes" {
 }
 
 test "formatStatLine caps bar at 20 chars" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStatLine(output.writer(), "big.zig", 50, 50);
@@ -660,7 +660,7 @@ test "formatStatLine caps bar at 20 chars" {
 }
 
 test "formatStatSummary with insertions and deletions" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStatSummary(output.writer(), 3, 10, 5);
@@ -669,7 +669,7 @@ test "formatStatSummary with insertions and deletions" {
 }
 
 test "formatStatSummary with only insertions" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStatSummary(output.writer(), 1, 42, 0);
@@ -678,7 +678,7 @@ test "formatStatSummary with only insertions" {
 }
 
 test "formatStatSummary with only deletions" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStatSummary(output.writer(), 2, 0, 15);

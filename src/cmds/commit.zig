@@ -22,7 +22,7 @@ pub const help =
 ;
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Parse arguments
     var message: ?[]const u8 = null;
@@ -463,7 +463,7 @@ pub fn formatCommitOutput(writer: anytype, hash: []const u8, message: []const u8
 const testing = std.testing;
 
 test "formatCommitOutput with one file" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatCommitOutput(output.writer(), "abc1234", "Test message", 1, 10, 5);
@@ -473,7 +473,7 @@ test "formatCommitOutput with one file" {
 }
 
 test "formatCommitOutput with multiple files" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatCommitOutput(output.writer(), "def5678", "Another commit", 3, 25, 10);
@@ -483,7 +483,7 @@ test "formatCommitOutput with multiple files" {
 }
 
 test "formatCommitOutput with no file changes" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatCommitOutput(output.writer(), "ghi9012", "Empty commit", 0, 0, 0);

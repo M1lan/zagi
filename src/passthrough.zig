@@ -4,7 +4,7 @@ const detect = @import("cmds/detect.zig");
 
 /// Pass through a command to git CLI
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
-    const stderr = std.fs.File.stderr().deprecatedWriter();
+    const stderr = std.io.getStdErr().writer();
 
     // Check guardrails in agent mode
     if (detect.isAgentMode()) {
@@ -18,7 +18,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         }
     }
 
-    var git_args = std.array_list.Managed([]const u8).init(allocator);
+    var git_args = std.ArrayList([]const u8).init(allocator);
     defer git_args.deinit();
 
     try git_args.append("git");

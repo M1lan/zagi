@@ -148,7 +148,7 @@ fn readClaudeCodeSession(allocator: std.mem.Allocator, cwd: []const u8) ?Session
 
 /// Convert JSONL (newline-delimited JSON) to a JSON array
 fn convertJsonlToArray(allocator: std.mem.Allocator, jsonl: []const u8) ![]const u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
+    var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
 
     try result.append('[');
@@ -212,7 +212,7 @@ fn readOpenCodeSession(allocator: std.mem.Allocator) ?Session {
         defer messages_dir.close();
 
         // Collect all messages into an array
-        var messages = std.array_list.Managed(u8).init(allocator);
+        var messages = std.ArrayList(u8).init(allocator);
         errdefer messages.deinit();
 
         messages.append('[') catch return null;

@@ -211,7 +211,7 @@ fn getValidatedExecutor(stdout: anytype) Error![]const u8 {
 }
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Need at least "zagi agent <subcommand>"
     if (args.len < 3) {
@@ -348,8 +348,8 @@ const planning_prompt_template =
 ;
 
 fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const stderr = std.fs.File.stderr().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
+    const stderr = std.io.getStdErr().writer();
 
     var dry_run = false;
     var initial_context: ?[]const u8 = null;
@@ -466,8 +466,8 @@ fn runPlan(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 /// - **Graceful completion**: Exits when all tasks done or all remaining
 ///   tasks have exceeded failure threshold
 fn runRun(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const stderr = std.fs.File.stderr().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
+    const stderr = std.io.getStdErr().writer();
 
     // Parse command options
     var once = false;
@@ -766,7 +766,7 @@ fn createPrompt(allocator: std.mem.Allocator, exe_path: []const u8, task_id: []c
 }
 
 fn executeTask(allocator: std.mem.Allocator, executor: []const u8, agent_cmd: ?[]const u8, exe_path: []const u8, task_id: []const u8, task_content: []const u8, log_path: ?[]const u8) !bool {
-    const stderr_writer = std.fs.File.stderr().deprecatedWriter();
+    const stderr_writer = std.io.getStdErr().writer();
 
     const prompt = try createPrompt(allocator, exe_path, task_id, task_content);
     defer allocator.free(prompt);

@@ -4,10 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const libgit2_dep = b.dependency("libgit2", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    const use_system_libgit2 = b.option(bool, "system-libgit2", "Use system libgit2 instead of vendored") orelse false;
 
     const exe = b.addExecutable(.{
         .name = "zagi",
@@ -18,7 +15,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.root_module.linkLibrary(libgit2_dep.artifact("git2"));
+    linkGit2(b, exe, target, optimize, use_system_libgit2);
 
     b.installArtifact(exe);
 
@@ -31,6 +28,8 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    // --- Tests ---
 
     const exe_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -47,7 +46,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    log_tests.root_module.linkLibrary(libgit2_dep.artifact("git2"));
 
     const git_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -56,7 +54,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    git_tests.root_module.linkLibrary(libgit2_dep.artifact("git2"));
 
     const alias_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -73,7 +70,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    add_tests.root_module.linkLibrary(libgit2_dep.artifact("git2"));
 
     const commit_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -82,7 +78,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    commit_tests.root_module.linkLibrary(libgit2_dep.artifact("git2"));
 
     const diff_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -91,7 +86,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    diff_tests.root_module.linkLibrary(libgit2_dep.artifact("git2"));
 
     const agent_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -101,6 +95,21 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Chunk tests (pure Zig, no libgit2)
+    const chunk_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cmds/chunk.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    // Link libgit2 for tests that need it
+    const libgit2_test_modules = [_]*std.Build.Step.Compile{ log_tests, git_tests, add_tests, commit_tests, diff_tests };
+    for (libgit2_test_modules) |t| {
+        linkGit2(b, t, target, optimize, use_system_libgit2);
+    }
+
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     const run_log_tests = b.addRunArtifact(log_tests);
     const run_git_tests = b.addRunArtifact(git_tests);
@@ -109,6 +118,7 @@ pub fn build(b: *std.Build) void {
     const run_commit_tests = b.addRunArtifact(commit_tests);
     const run_diff_tests = b.addRunArtifact(diff_tests);
     const run_agent_tests = b.addRunArtifact(agent_tests);
+    const run_chunk_tests = b.addRunArtifact(chunk_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
@@ -119,4 +129,26 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_commit_tests.step);
     test_step.dependOn(&run_diff_tests.step);
     test_step.dependOn(&run_agent_tests.step);
+    test_step.dependOn(&run_chunk_tests.step);
+}
+
+fn linkGit2(
+    b: *std.Build,
+    step: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    use_system: bool,
+) void {
+    if (use_system) {
+        step.root_module.linkSystemLibrary("git2", .{});
+        step.root_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
+        step.linkLibC();
+    } else {
+        if (b.lazyDependency("libgit2", .{
+            .target = target,
+            .optimize = optimize,
+        })) |libgit2_dep| {
+            step.root_module.linkLibrary(libgit2_dep.artifact("git2"));
+        }
+    }
 }

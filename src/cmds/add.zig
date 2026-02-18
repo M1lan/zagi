@@ -14,7 +14,7 @@ pub const help =
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{WriteError})!void {
     _ = allocator;
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Check for unsupported flags first
     for (args[2..]) |arg| {
@@ -129,7 +129,7 @@ pub fn formatStagedFile(writer: anytype, marker: []const u8, path: []const u8) !
 const testing = std.testing;
 
 test "formatStagedHeader with zero files" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStagedHeader(output.writer(), 0);
@@ -138,7 +138,7 @@ test "formatStagedHeader with zero files" {
 }
 
 test "formatStagedHeader with one file" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStagedHeader(output.writer(), 1);
@@ -147,7 +147,7 @@ test "formatStagedHeader with one file" {
 }
 
 test "formatStagedHeader with multiple files" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStagedHeader(output.writer(), 5);
@@ -156,7 +156,7 @@ test "formatStagedHeader with multiple files" {
 }
 
 test "formatStagedFile formats correctly" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStagedFile(output.writer(), "A ", "src/main.zig");
@@ -165,7 +165,7 @@ test "formatStagedFile formats correctly" {
 }
 
 test "formatStagedFile with modified marker" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try formatStagedFile(output.writer(), "M ", "README.md");

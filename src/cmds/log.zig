@@ -42,7 +42,7 @@ const Options = struct {
 };
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{OutOfMemory})!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Parse options
     var opts = Options{};

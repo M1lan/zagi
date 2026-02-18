@@ -20,7 +20,7 @@ pub const help =
 ;
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Parse arguments
     var fork_name: ?[]const u8 = null;
@@ -851,7 +851,7 @@ fn deleteAllForks(allocator: std.mem.Allocator, repo: ?*c.git_repository, stdout
     }
 
     // Collect names first (since we're modifying the list)
-    var deleted_names = std.array_list.Managed([]const u8).init(allocator);
+    var deleted_names = std.ArrayList([]const u8).init(allocator);
     defer deleted_names.deinit();
 
     for (0..worktree_list.count) |idx| {

@@ -19,7 +19,7 @@ const Shell = enum {
 };
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     var print_only = false;
 
@@ -222,7 +222,7 @@ fn writeAlias(file: std.fs.File, path: []const u8, alias_line: []const u8, write
 const testing = std.testing;
 
 test "printHelp outputs usage information" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try printHelp(output.writer());
@@ -234,7 +234,7 @@ test "printHelp outputs usage information" {
 }
 
 test "printInitInstructions for bash" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try printInitInstructions(output.writer(), .bash);
@@ -245,7 +245,7 @@ test "printInitInstructions for bash" {
 }
 
 test "printInitInstructions for zsh" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try printInitInstructions(output.writer(), .zsh);
@@ -256,7 +256,7 @@ test "printInitInstructions for zsh" {
 }
 
 test "printInitInstructions for fish" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try printInitInstructions(output.writer(), .fish);
@@ -267,7 +267,7 @@ test "printInitInstructions for fish" {
 }
 
 test "printInitInstructions for unknown shell shows all options" {
-    var output = std.array_list.Managed(u8).init(testing.allocator);
+    var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
     try printInitInstructions(output.writer(), .unknown);

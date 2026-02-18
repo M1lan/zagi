@@ -10,6 +10,7 @@ const fork = @import("cmds/fork.zig");
 const tasks = @import("cmds/tasks.zig");
 const agent = @import("cmds/agent.zig");
 const git = @import("cmds/git.zig");
+const chunk = @import("cmds/chunk.zig");
 
 const version = "0.1.0";
 
@@ -23,6 +24,7 @@ const Command = enum {
     fork_cmd,
     tasks_cmd,
     agent_cmd,
+    chunk_cmd,
     other,
 };
 
@@ -50,7 +52,7 @@ pub fn main() void {
 
 fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     if (args.len < 2) {
         printHelp(stdout) catch {};
@@ -73,6 +75,24 @@ fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Passthrough mode: -g/--git passes remaining args directly to git
     if (std.mem.eql(u8, cmd, "-g") or std.mem.eql(u8, cmd, "--git")) {
         try passthrough.run(allocator, args[1..]);
+        return;
+    }
+
+    // Experimental mode: -e/--experimental <subcommand> [args...]
+    if (std.mem.eql(u8, cmd, "-e") or std.mem.eql(u8, cmd, "--experimental")) {
+        if (args.len < 3) {
+            stdout.print("usage: zagi -e <command> [args...]\n\navailable experimental commands:\n  chunk    Content-defined chunking engine\n\n", .{}) catch {};
+            return;
+        }
+        const exp_cmd = args[2];
+        if (std.mem.eql(u8, exp_cmd, "chunk")) {
+            current_command = .chunk_cmd;
+            // Pass args after "chunk" to the command
+            const cmd_args: []const [:0]const u8 = @ptrCast(if (args.len > 3) args[3..] else args[0..0]);
+            try chunk.run(allocator, cmd_args);
+        } else {
+            stdout.print("unknown experimental command: {s}\n\navailable:\n  chunk    Content-defined chunking engine\n\n", .{exp_cmd}) catch {};
+        }
         return;
     }
 
@@ -130,9 +150,10 @@ fn printHelp(stdout: anytype) !void {
         \\  alias     Create an alias to git
         \\
         \\options:
-        \\  -h, --help     Show this help
-        \\  -v, --version  Show version
-        \\  -g, --git      Git passthrough mode (e.g. git -g log)
+        \\  -h, --help           Show this help
+        \\  -v, --version        Show version
+        \\  -g, --git            Git passthrough mode (e.g. git -g log)
+        \\  -e, --experimental   Run experimental commands (e.g. git -e chunk)
         \\
         \\Unrecognized commands are passed through to git.
         \\
@@ -141,7 +162,7 @@ fn printHelp(stdout: anytype) !void {
 }
 
 fn handleError(err: anyerror, cmd: Command) void {
-    const stderr = std.fs.File.stderr().deprecatedWriter();
+    const stderr = std.io.getStdErr().writer();
 
     const exit_code: u8 = switch (err) {
         git.Error.NotARepository => blk: {
@@ -216,6 +237,7 @@ fn printUsageHelp(stderr: anytype, cmd: Command) void {
         .fork_cmd => fork.help,
         .tasks_cmd => tasks.help,
         .agent_cmd => agent.help,
+        .chunk_cmd => chunk.help,
         .other => "usage: git <command> [args...]\n",
     };
 

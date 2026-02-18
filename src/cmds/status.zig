@@ -21,7 +21,7 @@ pub const help =
 const MAX_PATHSPECS = 16;
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{OutOfMemory})!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Parse arguments
     var pathspecs: [MAX_PATHSPECS][*c]u8 = undefined;
@@ -135,11 +135,11 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
     }
 
     // Collect files by category
-    var staged = std.array_list.Managed(FileStatus).init(allocator);
+    var staged = std.ArrayList(FileStatus).init(allocator);
     defer staged.deinit();
-    var modified = std.array_list.Managed(FileStatus).init(allocator);
+    var modified = std.ArrayList(FileStatus).init(allocator);
     defer modified.deinit();
-    var untracked = std.array_list.Managed(FileStatus).init(allocator);
+    var untracked = std.ArrayList(FileStatus).init(allocator);
     defer untracked.deinit();
 
     var i: usize = 0;

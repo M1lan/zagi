@@ -459,7 +459,7 @@ fn writeRef(repo: ?*c.git_repository, content: []const u8, allocator: std.mem.Al
 }
 
 pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     if (args.len < 3) {
         stdout.print("{s}", .{help}) catch {};
@@ -513,7 +513,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) Error!void {
 }
 
 fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Need at least: tasks add <content>
     if (args.len < 4) {
@@ -621,7 +621,7 @@ fn runAdd(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository
 }
 
 fn runList(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Parse --json flag
     var use_json = false;
@@ -745,7 +745,7 @@ fn formatTimestamp(timestamp: i64, allocator: std.mem.Allocator) Error![]u8 {
 }
 
 fn runShow(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Need at least: tasks show <id>
     if (args.len < 4) {
@@ -832,7 +832,7 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 }
 
 fn runDone(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Need at least: tasks done <id>
     if (args.len < 4) {
@@ -887,7 +887,7 @@ fn runDone(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 }
 
 fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Parse --json flag
     var use_json = false;
@@ -964,7 +964,7 @@ fn runReady(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposito
 
 fn runPr(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
     _ = args; // No additional args needed for pr
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Load task list from git ref
     var task_list = loadTaskList(repo, allocator) catch |err| {
@@ -1016,7 +1016,7 @@ fn runPr(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository)
 }
 
 fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Block edit in agent mode - agents should use append instead
     const detect = @import("detect.zig");
@@ -1126,7 +1126,7 @@ fn runEdit(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repositor
 }
 
 fn runAppend(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Need at least: tasks append <id> <content>
     if (args.len < 5) {
@@ -1202,7 +1202,7 @@ fn runAppend(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_reposit
 }
 
 fn runDelete(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Check if we should block this operation in agent mode
     const detect = @import("detect.zig");
@@ -1336,7 +1336,7 @@ fn parseTasksFromMarkdown(allocator: std.mem.Allocator, content: []const u8) !st
 }
 
 fn runImport(allocator: std.mem.Allocator, args: [][:0]u8, repo: ?*c.git_repository) Error!void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const stdout = std.io.getStdOut().writer();
 
     // Need at least: tasks import <file>
     if (args.len < 4) {
