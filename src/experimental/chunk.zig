@@ -14,7 +14,7 @@ const MIN_CHUNK: usize = 8 * 1024; // 8KB minimum
 const MAX_CHUNK: usize = 256 * 1024; // 256KB maximum
 const MASK_BITS: u6 = 16; // 2^16 = 64KB average
 const MASK: u64 = (@as(u64, 1) << MASK_BITS) - 1;
-const MAX_FILE_SIZE: usize = 512 * 1024 * 1024; // 512MB per file
+pub const MAX_FILE_SIZE: usize = 512 * 1024 * 1024; // 512MB per file
 
 pub const help =
     \\usage: zagi -e chunk <directory> [options]
@@ -173,6 +173,10 @@ pub fn reassemble(allocator: std.mem.Allocator, chunks: []const ChunkRef, store_
 
 // --- BLAKE3 Hashing ---
 
+pub fn blake3_pub(data: []const u8) Hash {
+    return blake3(data);
+}
+
 fn blake3(data: []const u8) Hash {
     var hasher = std.crypto.hash.Blake3.init(.{});
     hasher.update(data);
@@ -208,7 +212,7 @@ fn ensureStoreDir(base_path: []const u8) !std.fs.Dir {
     return cwd.openDir(base_path, .{}) catch return error.StoreCreateFailed;
 }
 
-fn storeChunk(store_dir: std.fs.Dir, hash: Hash, data: []const u8) !bool {
+pub fn storeChunk(store_dir: std.fs.Dir, hash: Hash, data: []const u8) !bool {
     const hex = hashToHex(hash);
     const prefix = hex[0..2];
     const filename = hex[2..];
@@ -405,7 +409,7 @@ fn verifyRoundTrip(
 
 // --- Formatting ---
 
-fn formatBytes(bytes: u64) struct { val: f64, unit: []const u8 } {
+pub fn formatBytes(bytes: u64) struct { val: f64, unit: []const u8 } {
     if (bytes >= 1024 * 1024 * 1024) {
         return .{
             .val = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0),

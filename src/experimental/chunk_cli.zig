@@ -1,7 +1,7 @@
 // Standalone CLI wrapper for the chunk command (for testing without full zagi build).
 // Usage: zig build-exe src/chunk_cli.zig && ./chunk_cli <dir> [--verify] [--clean] [--dry-run]
 const std = @import("std");
-const chunk = @import("cmds/chunk.zig");
+const chunk = @import("chunk.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

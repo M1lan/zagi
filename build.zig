@@ -95,10 +95,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Chunk tests (pure Zig, no libgit2)
+    // Experimental tests (pure Zig, no libgit2)
     const chunk_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cmds/chunk.zig"),
+            .root_source_file = b.path("src/experimental/chunk.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const snapshot_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/experimental/snapshot.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -119,6 +127,7 @@ pub fn build(b: *std.Build) void {
     const run_diff_tests = b.addRunArtifact(diff_tests);
     const run_agent_tests = b.addRunArtifact(agent_tests);
     const run_chunk_tests = b.addRunArtifact(chunk_tests);
+    const run_snapshot_tests = b.addRunArtifact(snapshot_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
@@ -130,6 +139,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_diff_tests.step);
     test_step.dependOn(&run_agent_tests.step);
     test_step.dependOn(&run_chunk_tests.step);
+    test_step.dependOn(&run_snapshot_tests.step);
 }
 
 fn linkGit2(

@@ -10,7 +10,8 @@ const fork = @import("cmds/fork.zig");
 const tasks = @import("cmds/tasks.zig");
 const agent = @import("cmds/agent.zig");
 const git = @import("cmds/git.zig");
-const chunk = @import("cmds/chunk.zig");
+const chunk = @import("experimental/chunk.zig");
+const snapshot = @import("experimental/snapshot.zig");
 
 const version = "0.1.0";
 
@@ -81,17 +82,23 @@ fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Experimental mode: -e/--experimental <subcommand> [args...]
     if (std.mem.eql(u8, cmd, "-e") or std.mem.eql(u8, cmd, "--experimental")) {
         if (args.len < 3) {
-            stdout.print("usage: zagi -e <command> [args...]\n\navailable experimental commands:\n  chunk    Content-defined chunking engine\n\n", .{}) catch {};
+            printExperimentalHelp(stdout);
             return;
         }
         const exp_cmd = args[2];
+        const cmd_args: []const [:0]const u8 = @ptrCast(if (args.len > 3) args[3..] else args[0..0]);
         if (std.mem.eql(u8, exp_cmd, "chunk")) {
             current_command = .chunk_cmd;
-            // Pass args after "chunk" to the command
-            const cmd_args: []const [:0]const u8 = @ptrCast(if (args.len > 3) args[3..] else args[0..0]);
             try chunk.run(allocator, cmd_args);
+        } else if (std.mem.eql(u8, exp_cmd, "snapshot")) {
+            current_command = .chunk_cmd;
+            try snapshot.runSnapshot(allocator, cmd_args);
+        } else if (std.mem.eql(u8, exp_cmd, "restore")) {
+            current_command = .chunk_cmd;
+            try snapshot.runRestore(allocator, cmd_args);
         } else {
-            stdout.print("unknown experimental command: {s}\n\navailable:\n  chunk    Content-defined chunking engine\n\n", .{exp_cmd}) catch {};
+            stdout.print("unknown experimental command: {s}\n\n", .{exp_cmd}) catch {};
+            printExperimentalHelp(stdout);
         }
         return;
     }
@@ -159,6 +166,19 @@ fn printHelp(stdout: anytype) !void {
         \\
         \\
     , .{});
+}
+
+fn printExperimentalHelp(stdout: anytype) void {
+    stdout.print(
+        \\usage: zagi -e <command> [args...]
+        \\
+        \\experimental commands:
+        \\  chunk      Content-defined chunking engine
+        \\  snapshot   Snapshot a directory (chunk + manifest)
+        \\  restore    Restore files from a snapshot manifest
+        \\
+        \\
+    , .{}) catch {};
 }
 
 fn handleError(err: anyerror, cmd: Command) void {
