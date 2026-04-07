@@ -41,8 +41,9 @@ const Options = struct {
     session_limit: usize = 20000,
 };
 
-pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{OutOfMemory})!void {
+pub fn run(allocator: std.mem.Allocator, args: [][:0]u8, format: git.OutputFormat) (git.Error || error{OutOfMemory})!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
+    const use_json = format == .json;
 
     // Parse options
     var opts = Options{};
@@ -147,6 +148,8 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
     var count: usize = 0;
     var total_matching: usize = 0;
 
+    if (use_json) stdout.print("[", .{}) catch return git.Error.WriteFailed;
+
     while (c.git_revwalk_next(&oid, walk) == 0) {
         var commit: ?*c.git_commit = null;
         if (c.git_commit_lookup(&commit, repo, &oid) < 0) {
@@ -162,16 +165,21 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
         total_matching += 1;
 
         if (count >= opts.max_count) {
-            // Keep counting for truncation message but don't print
             continue;
         }
 
-        printCommit(allocator, stdout, commit.?, &oid, opts) catch return git.Error.WriteFailed;
+        if (use_json) {
+            if (count > 0) stdout.print(",", .{}) catch return git.Error.WriteFailed;
+            printCommitJson(allocator, stdout, commit.?, &oid) catch return git.Error.WriteFailed;
+        } else {
+            printCommit(allocator, stdout, commit.?, &oid, opts) catch return git.Error.WriteFailed;
+        }
         count += 1;
     }
 
-    // Show truncation message
-    if (total_matching > opts.max_count) {
+    if (use_json) {
+        stdout.print("]\n", .{}) catch return git.Error.WriteFailed;
+    } else if (total_matching > opts.max_count) {
         const remaining = total_matching - opts.max_count;
         stdout.print("\n[{d} more commits, use -n to see more]\n", .{remaining}) catch return git.Error.WriteFailed;
     }
@@ -295,6 +303,67 @@ fn printCommit(
             }
         }
     }
+}
+
+fn printCommitJson(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    commit: *c.git_commit,
+    oid: *const c.git_oid,
+) !void {
+    var sha_buf: [41]u8 = undefined;
+    _ = c.git_oid_tostr(&sha_buf, sha_buf.len, oid);
+    const sha = std.mem.sliceTo(&sha_buf, 0);
+
+    const message_ptr = c.git_commit_message(commit);
+    const message = if (message_ptr) |ptr| std.mem.sliceTo(ptr, 0) else "";
+    const subject = if (std.mem.indexOf(u8, message, "\n")) |idx|
+        message[0..idx]
+    else
+        message;
+
+    const author = c.git_commit_author(commit);
+
+    if (author) |a| {
+        const full_name = if (a.*.name) |n| std.mem.sliceTo(n, 0) else "Unknown";
+        const email = if (a.*.email) |e| std.mem.sliceTo(e, 0) else "";
+        const date_str = try formatDate(allocator, a.*.when.time);
+        defer allocator.free(date_str);
+
+        try writer.print("{{\"hash\":\"{s}\",\"date\":\"{s}\",\"author\":\"{s}\",\"email\":\"{s}\",\"subject\":", .{
+            sha[0..7],
+            date_str,
+            full_name,
+            email,
+        });
+        try writeJsonString(writer, subject);
+        try writer.print("}}", .{});
+    } else {
+        try writer.print("{{\"hash\":\"{s}\",\"subject\":", .{sha[0..7]});
+        try writeJsonString(writer, subject);
+        try writer.print("}}", .{});
+    }
+}
+
+fn writeJsonString(writer: anytype, s: []const u8) !void {
+    try writer.print("\"", .{});
+    for (s) |ch| {
+        switch (ch) {
+            '"' => try writer.print("\\\"", .{}),
+            '\\' => try writer.print("\\\\", .{}),
+            '\n' => try writer.print("\\n", .{}),
+            '\r' => try writer.print("\\r", .{}),
+            '\t' => try writer.print("\\t", .{}),
+            else => {
+                if (ch < 0x20) {
+                    try writer.print("\\u{x:0>4}", .{ch});
+                } else {
+                    try writer.print("{c}", .{ch});
+                }
+            },
+        }
+    }
+    try writer.print("\"", .{});
 }
 
 fn formatDate(allocator: std.mem.Allocator, timestamp: i64) ![]u8 {

@@ -24,16 +24,11 @@ pub const Agent = enum {
     }
 };
 
-/// Agent mode detection (for guardrails + --prompt requirement)
+/// Agent mode detection (for --prompt requirement)
 /// Checks signals that are set by parent process and hard to bypass
 pub fn isAgentMode() bool {
-    // Native agent signals (set by IDE/CLI parent process)
     if (std.posix.getenv("CLAUDECODE") != null) return true;
     if (std.posix.getenv("OPENCODE") != null) return true;
-    // Custom agent signal (must be non-empty to enable agent mode)
-    if (std.posix.getenv("ZAGI_AGENT")) |v| {
-        if (v.len > 0) return true;
-    }
     return false;
 }
 

@@ -9,7 +9,7 @@ const commit = @import("cmds/commit.zig");
 const diff = @import("cmds/diff.zig");
 const fork = @import("cmds/fork.zig");
 const tasks = @import("cmds/tasks.zig");
-const agent = @import("cmds/agent.zig");
+const override = @import("cmds/override.zig");
 const git = @import("cmds/git.zig");
 
 const version = build_options.version;
@@ -23,7 +23,6 @@ const Command = enum {
     diff_cmd,
     fork_cmd,
     tasks_cmd,
-    agent_cmd,
     other,
 };
 
@@ -71,44 +70,88 @@ fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         return;
     }
 
-    // Passthrough mode: -g/--git passes remaining args directly to git
-    if (std.mem.eql(u8, cmd, "-g") or std.mem.eql(u8, cmd, "--git")) {
-        try passthrough.run(allocator, args[1..]);
+    // Detect global output format flags (--compat, --json)
+    // Both flags are stripped from args. --compat triggers passthrough.
+    // --json sets format for format-aware commands; for others (tasks), it's re-added.
+    var format = git.OutputFormat.succinct;
+    var filtered_args = std.array_list.Managed([:0]u8).init(allocator);
+    defer filtered_args.deinit();
+
+    for (args) |arg| {
+        const a = std.mem.sliceTo(arg, 0);
+        if (std.mem.eql(u8, a, "--compat")) {
+            format = .compat;
+        } else if (std.mem.eql(u8, a, "--json")) {
+            format = .json;
+        } else {
+            try filtered_args.append(arg);
+        }
+    }
+
+    var fargs = filtered_args.items;
+
+    // --compat mode: passthrough to git for all commands
+    if (format == .compat) {
+        try passthrough.run(allocator, fargs);
         return;
     }
 
+    if (fargs.len < 2) {
+        printHelp(stdout) catch {};
+        return;
+    }
+
+    const subcmd = std.mem.sliceTo(fargs[1], 0);
+
+    // For commands that handle --json themselves (tasks), re-add the flag to args
+    var args_with_json = std.array_list.Managed([:0]u8).init(allocator);
+    defer args_with_json.deinit();
+
+    if (format == .json) {
+        const handles_own_json = std.mem.eql(u8, subcmd, "tasks");
+        if (handles_own_json) {
+            for (fargs) |arg| {
+                try args_with_json.append(arg);
+            }
+            // Find the position after the subcommand to insert --json
+            // Just append it at the end
+            const json_flag = @as([:0]u8, @constCast("--json"));
+            try args_with_json.append(json_flag);
+            fargs = args_with_json.items;
+        }
+    }
+
     // Zagi commands
-    if (std.mem.eql(u8, cmd, "log")) {
+    if (std.mem.eql(u8, subcmd, "log")) {
         current_command = .log_cmd;
-        try log.run(allocator, args);
-    } else if (std.mem.eql(u8, cmd, "status")) {
+        try log.run(allocator, fargs, format);
+    } else if (std.mem.eql(u8, subcmd, "status")) {
         current_command = .status_cmd;
-        try status.run(allocator, args);
-    } else if (std.mem.eql(u8, cmd, "add")) {
+        try status.run(allocator, fargs, format);
+    } else if (std.mem.eql(u8, subcmd, "add")) {
         current_command = .add_cmd;
-        try add.run(allocator, args);
-    } else if (std.mem.eql(u8, cmd, "alias")) {
+        try add.run(allocator, fargs, format);
+    } else if (std.mem.eql(u8, subcmd, "alias")) {
         current_command = .alias_cmd;
-        try alias.run(allocator, args);
-    } else if (std.mem.eql(u8, cmd, "commit")) {
+        try alias.run(allocator, fargs);
+    } else if (std.mem.eql(u8, subcmd, "commit")) {
         current_command = .commit_cmd;
-        try commit.run(allocator, args);
-    } else if (std.mem.eql(u8, cmd, "diff")) {
+        try commit.run(allocator, fargs, format);
+    } else if (std.mem.eql(u8, subcmd, "diff")) {
         current_command = .diff_cmd;
-        try diff.run(allocator, args);
-    } else if (std.mem.eql(u8, cmd, "fork")) {
+        try diff.run(allocator, fargs, format);
+    } else if (std.mem.eql(u8, subcmd, "fork")) {
         current_command = .fork_cmd;
-        try fork.run(allocator, args);
-    } else if (std.mem.eql(u8, cmd, "tasks")) {
+        try fork.run(allocator, fargs);
+    } else if (std.mem.eql(u8, subcmd, "tasks")) {
         current_command = .tasks_cmd;
-        try tasks.run(allocator, args);
-    } else if (std.mem.eql(u8, cmd, "agent")) {
-        current_command = .agent_cmd;
-        try agent.run(allocator, args);
+        try tasks.run(allocator, fargs);
+    } else if (std.mem.eql(u8, subcmd, "set-override")) {
+        try override.run(fargs);
     } else {
         // Unknown command: pass through to git
         current_command = .other;
-        try passthrough.run(allocator, args);
+        try passthrough.run(allocator, fargs);
     }
 }
 
@@ -127,13 +170,14 @@ fn printHelp(stdout: anytype) !void {
         \\  commit    Create a commit
         \\  fork      Manage parallel worktrees
         \\  tasks     Task management for git repositories
-        \\  agent     Execute RALPH loop to complete tasks
         \\  alias     Create an alias to git
+        \\  set-override  Set guardrails bypass secret
         \\
         \\options:
         \\  -h, --help     Show this help
         \\  -v, --version  Show version
-        \\  -g, --git      Git passthrough mode (e.g. git -g log)
+        \\  --compat       Output identical to git CLI
+        \\  --json         Output in JSON format
         \\
         \\Unrecognized commands are passed through to git.
         \\
@@ -216,7 +260,6 @@ fn printUsageHelp(stderr: anytype, cmd: Command) void {
         .diff_cmd => diff.help,
         .fork_cmd => fork.help,
         .tasks_cmd => tasks.help,
-        .agent_cmd => agent.help,
         .other => "usage: git <command> [args...]\n",
     };
 

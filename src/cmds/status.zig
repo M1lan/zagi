@@ -20,21 +20,19 @@ pub const help =
 
 const MAX_PATHSPECS = 16;
 
-pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{OutOfMemory})!void {
+pub fn run(allocator: std.mem.Allocator, args: [][:0]u8, format: git.OutputFormat) (git.Error || error{OutOfMemory})!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
+    const use_json = format == .json;
 
     // Parse arguments
     var pathspecs: [MAX_PATHSPECS][*c]u8 = undefined;
     var pathspec_count: usize = 0;
-    var use_json = false;
 
     for (args[2..]) |arg| {
         const a = std.mem.sliceTo(arg, 0);
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             stdout.print("{s}", .{help}) catch {};
             return;
-        } else if (std.mem.eql(u8, a, "--json")) {
-            use_json = true;
         } else if (std.mem.eql(u8, a, "-s") or std.mem.eql(u8, a, "--short")) {
             // Already short format by default, ignore
         } else if (std.mem.eql(u8, a, "-b") or std.mem.eql(u8, a, "--branch")) {
@@ -69,42 +67,52 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
     const head_err = c.git_repository_head(&head, repo);
     defer if (head != null) c.git_reference_free(head);
 
+    var branch_name: []const u8 = "(HEAD detached)";
+
     if (head_err == 0 and head != null) {
-        const branch_name = c.git_reference_shorthand(head);
-        if (branch_name) |name| {
-            const branch = std.mem.sliceTo(name, 0);
-            stdout.print("branch: {s}", .{branch}) catch return git.Error.WriteFailed;
+        const ref_name = c.git_reference_shorthand(head);
+        if (ref_name) |name| {
+            branch_name = std.mem.sliceTo(name, 0);
 
-            // Check upstream status
-            var upstream: ?*c.git_reference = null;
-            if (c.git_branch_upstream(&upstream, head) == 0 and upstream != null) {
-                defer c.git_reference_free(upstream);
+            if (!use_json) {
+                stdout.print("branch: {s}", .{branch_name}) catch return git.Error.WriteFailed;
 
-                var ahead: usize = 0;
-                var behind: usize = 0;
-                const local_oid = c.git_reference_target(head);
-                const upstream_oid = c.git_reference_target(upstream);
+                // Check upstream status
+                var upstream: ?*c.git_reference = null;
+                if (c.git_branch_upstream(&upstream, head) == 0 and upstream != null) {
+                    defer c.git_reference_free(upstream);
 
-                if (local_oid != null and upstream_oid != null) {
-                    _ = c.git_graph_ahead_behind(&ahead, &behind, repo, local_oid, upstream_oid);
+                    var ahead: usize = 0;
+                    var behind: usize = 0;
+                    const local_oid = c.git_reference_target(head);
+                    const upstream_oid = c.git_reference_target(upstream);
 
-                    if (ahead == 0 and behind == 0) {
-                        stdout.print(" (up to date)", .{}) catch return git.Error.WriteFailed;
-                    } else if (ahead > 0 and behind == 0) {
-                        stdout.print(" (ahead {d})", .{ahead}) catch return git.Error.WriteFailed;
-                    } else if (behind > 0 and ahead == 0) {
-                        stdout.print(" (behind {d})", .{behind}) catch return git.Error.WriteFailed;
-                    } else {
-                        stdout.print(" (ahead {d}, behind {d})", .{ ahead, behind }) catch return git.Error.WriteFailed;
+                    if (local_oid != null and upstream_oid != null) {
+                        _ = c.git_graph_ahead_behind(&ahead, &behind, repo, local_oid, upstream_oid);
+
+                        if (ahead == 0 and behind == 0) {
+                            stdout.print(" (up to date)", .{}) catch return git.Error.WriteFailed;
+                        } else if (ahead > 0 and behind == 0) {
+                            stdout.print(" (ahead {d})", .{ahead}) catch return git.Error.WriteFailed;
+                        } else if (behind > 0 and ahead == 0) {
+                            stdout.print(" (behind {d})", .{behind}) catch return git.Error.WriteFailed;
+                        } else {
+                            stdout.print(" (ahead {d}, behind {d})", .{ ahead, behind }) catch return git.Error.WriteFailed;
+                        }
                     }
                 }
+                stdout.print("\n", .{}) catch return git.Error.WriteFailed;
             }
-            stdout.print("\n", .{}) catch return git.Error.WriteFailed;
         }
     } else if (head_err == c.GIT_EUNBORNBRANCH) {
-        stdout.print("branch: (no commits yet)\n", .{}) catch return git.Error.WriteFailed;
+        branch_name = "(no commits yet)";
+        if (!use_json) {
+            stdout.print("branch: (no commits yet)\n", .{}) catch return git.Error.WriteFailed;
+        }
     } else {
-        stdout.print("branch: HEAD detached\n", .{}) catch return git.Error.WriteFailed;
+        if (!use_json) {
+            stdout.print("branch: HEAD detached\n", .{}) catch return git.Error.WriteFailed;
+        }
     }
 
     // Get status
@@ -128,11 +136,6 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
     defer c.git_status_list_free(status_list);
 
     const count = c.git_status_list_entrycount(status_list);
-
-    if (count == 0) {
-        stdout.print("\nnothing to commit, working tree clean\n", .{}) catch return git.Error.WriteFailed;
-        return;
-    }
 
     // Collect files by category
     var staged = std.array_list.Managed(FileStatus).init(allocator);
@@ -178,6 +181,16 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Out
         }
     }
 
+    if (use_json) {
+        printJson(stdout, branch_name, staged.items, modified.items, untracked.items, count == 0);
+        return;
+    }
+
+    if (count == 0) {
+        stdout.print("\nnothing to commit, working tree clean\n", .{}) catch return git.Error.WriteFailed;
+        return;
+    }
+
     // Print staged
     if (staged.items.len > 0) {
         stdout.print("\nstaged: {d} files\n", .{staged.items.len}) catch return git.Error.WriteFailed;
@@ -212,3 +225,31 @@ const FileStatus = struct {
     marker: []const u8,
     path: []const u8,
 };
+
+fn printJson(stdout: anytype, branch: []const u8, staged: []const FileStatus, modified_items: []const FileStatus, untracked_items: []const FileStatus, clean: bool) void {
+    stdout.print("{{\"branch\":\"{s}\",\"clean\":{s},\"staged\":[", .{
+        branch,
+        if (clean) "true" else "false",
+    }) catch return;
+    for (staged, 0..) |file, idx| {
+        if (idx > 0) stdout.print(",", .{}) catch return;
+        stdout.print("{{\"marker\":\"{s}\",\"path\":\"{s}\"}}", .{
+            std.mem.trimRight(u8, file.marker, " "),
+            file.path,
+        }) catch return;
+    }
+    stdout.print("],\"modified\":[", .{}) catch return;
+    for (modified_items, 0..) |file, idx| {
+        if (idx > 0) stdout.print(",", .{}) catch return;
+        stdout.print("{{\"marker\":\"{s}\",\"path\":\"{s}\"}}", .{
+            std.mem.trimRight(u8, file.marker, " "),
+            file.path,
+        }) catch return;
+    }
+    stdout.print("],\"untracked\":[", .{}) catch return;
+    for (untracked_items, 0..) |file, idx| {
+        if (idx > 0) stdout.print(",", .{}) catch return;
+        stdout.print("\"{s}\"", .{file.path}) catch return;
+    }
+    stdout.print("]}}\n", .{}) catch return;
+}

@@ -23,12 +23,6 @@ export function zagi(args: string[], options: ZagiOptions = {}): string {
 
   // By default, remove agent mode env vars unless explicitly set
   // This ensures tests run outside agent mode by default
-  if (!("ZAGI_AGENT" in envOverrides)) {
-    delete env.ZAGI_AGENT;
-  }
-  if (!("ZAGI_AGENT_CMD" in envOverrides)) {
-    delete env.ZAGI_AGENT_CMD;
-  }
   if (!("ZAGI_STRIP_COAUTHORS" in envOverrides)) {
     delete env.ZAGI_STRIP_COAUTHORS;
   }

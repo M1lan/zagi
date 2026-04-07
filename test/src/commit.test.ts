@@ -143,23 +143,32 @@ describe("zagi commit --prompt", () => {
   });
 });
 
-describe("ZAGI_AGENT", () => {
-  test("ZAGI_AGENT requires --prompt", () => {
+describe("agent mode", () => {
+  test("ZAGI_REQUIRE_PROMPT_COMMIT requires --prompt in agent mode", () => {
     stageTestFile();
     const result = zagi(
       ["commit", "-m", "Agent commit"],
-      { cwd: REPO_DIR, env: { ZAGI_AGENT: "claude-code" } }
+      { cwd: REPO_DIR, env: { CLAUDECODE: "1", ZAGI_REQUIRE_PROMPT_COMMIT: "1" } }
     );
 
     expect(result).toContain("--prompt required");
-    expect(result).toContain("agent mode");
   });
 
-  test("ZAGI_AGENT succeeds with --prompt", () => {
+  test("agent mode without ZAGI_REQUIRE_PROMPT_COMMIT does not require --prompt", () => {
+    stageTestFile();
+    const result = zagi(
+      ["commit", "-m", "Agent commit no prompt"],
+      { cwd: REPO_DIR, env: { CLAUDECODE: "1" } }
+    );
+
+    expect(result).toContain("committed:");
+  });
+
+  test("agent mode succeeds with --prompt", () => {
     stageTestFile();
     const result = zagi(
       ["commit", "-m", "Agent commit", "--prompt", "Agent prompt"],
-      { cwd: REPO_DIR, env: { ZAGI_AGENT: "claude-code" } }
+      { cwd: REPO_DIR, env: { CLAUDECODE: "1" } }
     );
 
     expect(result).toContain("committed:");

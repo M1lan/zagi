@@ -7,7 +7,8 @@
 - 121 git compatible commands
 - ~50% smaller output that doesn't overflow context windows
 - 1.5-2x faster than git in all implemented commands
-- Agent friendly features like `fork`, `prompt` and `guardrails`
+- Agent friendly features like `fork` and `prompt`
+- Three output modes: succinct (default), `--compat` (git-identical), `--json`
 - Git passthrough for non implemented commands
 
 ## Installation
@@ -40,6 +41,41 @@ git commit -m "x"  # shows commit stats
 ```
 
 Any commands or flags not yet implemented in zagi pass through to git. zagi also comes with its own set of features for managing code written by agents.
+
+### Output modes
+
+zagi has three output modes:
+
+**Succinct** (default) — token-efficient output for agents:
+
+```bash
+git status
+# branch: main
+# staged: 2 files
+#   A  src/new.ts
+#   M  src/main.ts
+```
+
+**Compat** — identical to git CLI output:
+
+```bash
+git --compat status
+git --compat log --oneline -5
+git --compat diff --stat
+```
+
+**JSON** — structured output for machine parsing:
+
+```bash
+git --json status
+# {"branch":"main","clean":false,"staged":[{"marker":"A","path":"src/new.ts"}],"modified":[],"untracked":[]}
+
+git --json log -n 3
+# [{"hash":"abc123f","date":"2025-01-15","author":"Alice","email":"alice@example.com","subject":"Add feature"}]
+
+git --json diff
+# {"files":[{"path":"src/main.ts","insertions":5,"deletions":2}]}
+```
 
 ### Easy worktrees
 
@@ -76,9 +112,8 @@ export ZAGI_AGENT=my-agent
 ```
 
 This enables:
-- **Prompt tracking**: `git commit` requires `--prompt` to record the user request that created the commit
+- **Prompt tracking**: `git commit --prompt` records the user request that created the commit
 - **AI attribution**: Automatically detects and stores which AI agent made the commit
-- **Guardrails**: Blocks destructive commands (`reset --hard`, `checkout .`, `clean -f`, `push --force`) to prevent data loss
 
 ```bash
 git commit -m "Add feature" --prompt "Add a logout button to the header"
@@ -89,26 +124,32 @@ git log --session   # view full session transcript (with pagination)
 
 Metadata is stored in git notes (`refs/notes/agent`, `refs/notes/prompt`, `refs/notes/session`) which are local by default and don't affect commit history.
 
-### Environment variables
+### Guardrails
 
-| Variable | Description | Default | Valid values |
-|----------|-------------|---------|--------------|
-| `ZAGI_AGENT` | Manually enable agent mode. Auto-detected from `CLAUDECODE`, `OPENCODE`, or IDE environment. | (auto) | Any string enables agent mode. For executors: `claude`, `opencode` |
-| `ZAGI_AGENT_CMD` | Custom executor command override. When set, the prompt is appended as the final argument. | (unset) | Any shell command (e.g., `aider --yes`) |
-| `ZAGI_STRIP_COAUTHORS` | Strips `Co-Authored-By:` lines from commit messages. | (unset) | `1` to enable |
-
-**Agent detection**: Agent mode is automatically enabled when `CLAUDECODE=1` or `OPENCODE=1` is set (by Claude Code or OpenCode), or when running in VS Code/Cursor/Windsurf terminals.
+Opt-in protection against destructive commands (`reset --hard`, `push --force`, `clean -f`, etc.):
 
 ```bash
-# Use Claude Code (default)
-ZAGI_AGENT=claude zagi agent run
-
-# Use opencode
-ZAGI_AGENT=opencode zagi agent run
-
-# Use a custom command
-ZAGI_AGENT_CMD="aider --yes" zagi agent run
+export ZAGI_GUARDRAILS=1
+git reset --hard HEAD~1  # blocked!
 ```
+
+To bypass guardrails, set an override secret:
+
+```bash
+git set-override pineapples
+ZAGI_OVERRIDE=pineapples git reset --hard HEAD~1  # allowed
+```
+
+### Environment variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ZAGI_GUARDRAILS` | Block destructive git commands. Bypass with `ZAGI_OVERRIDE`. | (unset) |
+| `ZAGI_OVERRIDE` | Bypass guardrails with the secret set via `git set-override`. | (unset) |
+| `ZAGI_REQUIRE_PROMPT_COMMIT` | Require `--prompt` on commits in agent mode. | (unset) |
+| `ZAGI_STRIP_COAUTHORS` | Strip `Co-Authored-By:` lines from commit messages. | (unset) |
+
+Agent mode is automatically detected when running inside Claude Code (`CLAUDECODE=1`) or OpenCode (`OPENCODE=1`).
 
 ### Strip co-authors
 
@@ -119,15 +160,6 @@ export ZAGI_STRIP_COAUTHORS=1
 git commit -m "Add feature
 
 Co-Authored-By: Claude <claude@anthropic.com>"  # stripped automatically
-```
-
-### Git passthrough
-
-Commands zagi doesn't implement pass through to git or use `-g` to force standard git output:
-
-```bash
-git -g log         # native git log output
-git --git diff     # native git diff output
 ```
 
 ## Output comparison
@@ -156,6 +188,7 @@ Requirements: Zig 0.15, Bun
 zig build                           # build
 zig build test                      # run zig tests
 cd test && bun i && bun run test    # run integration tests
+bash test/conformance.sh ./zig-out/bin/zagi  # run conformance tests
 ```
 
 See [AGENTS.md](AGENTS.md) for contribution guidelines.

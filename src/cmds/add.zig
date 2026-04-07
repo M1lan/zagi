@@ -12,8 +12,9 @@ pub const help =
     \\
 ;
 
-pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{WriteError})!void {
+pub fn run(allocator: std.mem.Allocator, args: [][:0]u8, format: git.OutputFormat) (git.Error || error{WriteError})!void {
     _ = allocator;
+    const use_json = format == .json;
     const stdout = std.fs.File.stdout().deprecatedWriter();
 
     // Check for unsupported flags first
@@ -88,6 +89,27 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) (git.Error || error{Wri
     defer c.git_status_list_free(status_list);
 
     const count = c.git_status_list_entrycount(status_list);
+
+    if (use_json) {
+        stdout.print("{{\"staged\":[", .{}) catch return error.WriteError;
+        var j: usize = 0;
+        var file_idx: usize = 0;
+        while (j < count) : (j += 1) {
+            const entry = c.git_status_byindex(status_list, j);
+            if (entry == null) continue;
+            const delta = entry.*.head_to_index;
+            if (delta) |d| {
+                const path = if (d.*.new_file.path) |p| std.mem.sliceTo(p, 0) else "";
+                const marker = std.mem.trimRight(u8, git.indexMarker(entry.*.status), " ");
+                if (file_idx > 0) stdout.print(",", .{}) catch return error.WriteError;
+                stdout.print("{{\"marker\":\"{s}\",\"path\":\"{s}\"}}", .{ marker, path }) catch return error.WriteError;
+                file_idx += 1;
+            }
+        }
+        stdout.print("]}}\n", .{}) catch return error.WriteError;
+        return;
+    }
+
     if (count == 0) {
         stdout.print("nothing to add\n", .{}) catch return error.WriteError;
         return;

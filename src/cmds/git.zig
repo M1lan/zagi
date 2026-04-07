@@ -1,6 +1,12 @@
 const std = @import("std");
 pub const c = @cImport(@cInclude("git2.h"));
 
+pub const OutputFormat = enum {
+    succinct, // Default: token-efficient output
+    compat, // Exact git CLI output (passthrough)
+    json, // Structured JSON output
+};
+
 pub const Error = error{
     InitFailed,
     NotARepository,

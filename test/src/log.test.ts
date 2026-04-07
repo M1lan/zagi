@@ -35,9 +35,9 @@ describe("zagi log", () => {
     expect(commitLines.length).toBeLessThanOrEqual(3);
   });
 
-  test("passthrough -g gives full git output", () => {
+  test("--compat gives full git output", () => {
     const concise = zagi(["log", "-n", "1"], { cwd: REPO_DIR });
-    const full = zagi(["-g", "log", "-n", "1"], { cwd: REPO_DIR });
+    const full = zagi(["--compat", "log", "-n", "1"], { cwd: REPO_DIR });
 
     expect(full.length).toBeGreaterThan(concise.length);
     expect(full).toContain("Author:");

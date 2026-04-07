@@ -100,8 +100,9 @@ fn getMergeBaseTree(repo: ?*c.git_repository, spec1: []const u8, spec2: []const 
 
 const MAX_PATHSPECS = 16;
 
-pub fn run(_: std.mem.Allocator, args: [][:0]u8) DiffError!void {
+pub fn run(_: std.mem.Allocator, args: [][:0]u8, format: git.OutputFormat) DiffError!void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
+    const use_json = format == .json;
 
     // Parse args
     var staged = false;
@@ -233,6 +234,11 @@ pub fn run(_: std.mem.Allocator, args: [][:0]u8) DiffError!void {
     defer c.git_diff_free(diff);
 
     // Output based on mode
+    if (use_json) {
+        printDiffJson(diff, stdout);
+        return;
+    }
+
     switch (output_mode) {
         .stat => {
             printStat(diff, stdout);
@@ -344,6 +350,35 @@ fn printNameOnly(diff: ?*c.git_diff, stdout: std.fs.File.DeprecatedWriter) void 
         const path = if (delta.*.new_file.path) |p| std.mem.sliceTo(p, 0) else continue;
         stdout.print("{s}\n", .{path}) catch {};
     }
+}
+
+fn printDiffJson(diff: ?*c.git_diff, stdout: std.fs.File.DeprecatedWriter) void {
+    const num_deltas = c.git_diff_num_deltas(diff);
+
+    stdout.print("{{\"files\":[", .{}) catch return;
+
+    var file_idx: usize = 0;
+    var i: usize = 0;
+    while (i < num_deltas) : (i += 1) {
+        const delta = c.git_diff_get_delta(diff, i);
+        if (delta == null) continue;
+
+        const path = if (delta.*.new_file.path) |p| std.mem.sliceTo(p, 0) else continue;
+
+        var patch: ?*c.git_patch = null;
+        if (c.git_patch_from_diff(&patch, diff, i) < 0) continue;
+        defer c.git_patch_free(patch);
+
+        var adds: usize = 0;
+        var dels: usize = 0;
+        _ = c.git_patch_line_stats(null, &adds, &dels, patch);
+
+        if (file_idx > 0) stdout.print(",", .{}) catch return;
+        stdout.print("{{\"path\":\"{s}\",\"insertions\":{d},\"deletions\":{d}}}", .{ path, adds, dels }) catch return;
+        file_idx += 1;
+    }
+
+    stdout.print("]}}\n", .{}) catch return;
 }
 
 fn printCallback(

@@ -232,7 +232,7 @@ describe("zagi tasks edit", () => {
 
     const result = zagi(["tasks", "edit", "task-001", "New content"], {
       cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
+      env: { CLAUDECODE: "1" }
     });
 
     // Edit is blocked in agent mode - agents should use append
@@ -246,7 +246,7 @@ describe("zagi tasks edit", () => {
     // Explicitly unset ZAGI_AGENT to test non-agent mode
     const result = zagi(["tasks", "edit", "task-001", "Updated content"], {
       cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "" }
+      env: { CLAUDECODE: undefined }
     });
 
     expect(result).toContain("updated: task-001");
@@ -274,7 +274,7 @@ describe("zagi tasks append", () => {
 
     const result = zagi(["tasks", "append", "task-001", "Agent notes"], {
       cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
+      env: { CLAUDECODE: "1" }
     });
 
     expect(result).toContain("appended: task-001");
@@ -288,7 +288,7 @@ describe("zagi tasks delete", () => {
 
     const result = zagi(["tasks", "delete", "task-001"], {
       cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
+      env: { CLAUDECODE: "1" }
     });
 
     expect(result).toContain("error: delete command blocked");
@@ -302,7 +302,7 @@ describe("zagi tasks delete", () => {
     // Explicitly unset ZAGI_AGENT to test non-agent mode
     const result = zagi(["tasks", "delete", "task-001"], {
       cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "" }
+      env: { CLAUDECODE: undefined }
     });
 
     expect(result).toContain("deleted: task-001");
@@ -355,260 +355,6 @@ describe("zagi tasks pr", () => {
 // ============================================================================
 // Agent Commands
 // ============================================================================
-
-describe("zagi agent", () => {
-  test("shows help when no subcommand", () => {
-    const result = zagi(["agent"], { cwd: REPO_DIR });
-
-    expect(result).toContain("usage: git agent <command>");
-    expect(result).toContain("Commands:");
-    expect(result).toContain("run");
-    expect(result).toContain("plan");
-  });
-
-  test("agent --help shows help", () => {
-    const result = zagi(["agent", "--help"], { cwd: REPO_DIR });
-
-    expect(result).toContain("usage: git agent <command>");
-  });
-
-  test("agent run --help shows run help", () => {
-    const result = zagi(["agent", "run", "--help"], { cwd: REPO_DIR });
-
-    expect(result).toContain("usage: git agent run");
-    expect(result).toContain("--once");
-    expect(result).toContain("--dry-run");
-    expect(result).toContain("--max-tasks");
-  });
-
-  test("agent plan --help shows plan help", () => {
-    const result = zagi(["agent", "plan", "--help"], { cwd: REPO_DIR });
-
-    expect(result).toContain("usage: git agent plan");
-    expect(result).toContain("[description]"); // Optional, hence brackets
-    expect(result).toContain("--dry-run");
-  });
-
-  test("agent plan --dry-run shows planning prompt", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Add user auth"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain("Interactive Planning Session (dry-run)");
-    expect(result).toContain("Initial context: Add user auth");
-    expect(result).toContain("Would execute:");
-    expect(result).toContain("claude"); // No -p flag for interactive mode
-    expect(result).toContain("Prompt Preview");
-    expect(result).toContain("INITIAL CONTEXT: Add user auth");
-  });
-
-  test("agent plan without description starts interactive session", () => {
-    // agent plan without description starts interactive mode (asks user what to build)
-    const result = zagi(["agent", "plan", "--dry-run"], { cwd: REPO_DIR });
-
-    expect(result).toContain("Interactive Planning Session");
-    expect(result).toContain("Initial context: (none - will ask user)");
-  });
-
-  test("agent unknown subcommand shows error", () => {
-    const result = zagi(["agent", "invalid"], { cwd: REPO_DIR });
-
-    expect(result).toContain("error: unknown command 'invalid'");
-    expect(result).toContain("usage: git agent <command>");
-  });
-});
-
-// ============================================================================
-// Agent Plan --dry-run (Prompt Generation)
-// ============================================================================
-
-describe("zagi agent plan --dry-run", () => {
-  test("generates correct prompt structure", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Build a REST API"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    // Verify all prompt sections are present
-    expect(result).toContain("=== Interactive Planning Session (dry-run) ===");
-    expect(result).toContain("Initial context: Build a REST API");
-    expect(result).toContain("Would execute:");
-    expect(result).toContain("--- Prompt Preview ---");
-    expect(result).toContain("You are an interactive planning agent");
-    expect(result).toContain("INITIAL CONTEXT: Build a REST API");
-    expect(result).toContain("PHASE 1: EXPLORE CODEBASE");
-    expect(result).toContain("Read AGENTS.md");
-    expect(result).toContain("PHASE 4: CREATE TASKS");
-    expect(result).toContain("tasks add");
-    expect(result).toContain("=== RULES ===");
-    expect(result).toContain("NEVER git push");
-  });
-
-  test("includes absolute path to zagi binary", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Test task"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    // The prompt should include the absolute path for task commands
-    expect(result).toMatch(/\/.*\/zagi tasks add/);
-    expect(result).toMatch(/\/.*\/zagi tasks list/);
-  });
-
-  test("handles goal with double quotes", () => {
-    const result = zagi(["agent", "plan", "--dry-run", 'Add "login" button'], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain('Initial context: Add "login" button');
-    expect(result).toContain('INITIAL CONTEXT: Add "login" button');
-  });
-
-  test("handles goal with single quotes", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Add 'logout' feature"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain("Initial context: Add 'logout' feature");
-    expect(result).toContain("INITIAL CONTEXT: Add 'logout' feature");
-  });
-
-  test("handles goal with backticks", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Add `code` formatting"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain("Initial context: Add `code` formatting");
-    expect(result).toContain("INITIAL CONTEXT: Add `code` formatting");
-  });
-
-  test("handles goal with shell special characters", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Fix $PATH & ENV vars"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain("Initial context: Fix $PATH & ENV vars");
-    expect(result).toContain("INITIAL CONTEXT: Fix $PATH & ENV vars");
-  });
-
-  test("handles goal with angle brackets", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Add <input> validation"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain("Initial context: Add <input> validation");
-    expect(result).toContain("INITIAL CONTEXT: Add <input> validation");
-  });
-
-  test("handles goal with parentheses and brackets", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Refactor function(args) and array[0]"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain("Initial context: Refactor function(args) and array[0]");
-    expect(result).toContain("INITIAL CONTEXT: Refactor function(args) and array[0]");
-  });
-
-  test("handles goal with unicode characters", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Add emoji support"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain("Initial context: Add emoji support");
-    expect(result).toContain("INITIAL CONTEXT: Add emoji support");
-  });
-
-  test("handles goal with newline in content", () => {
-    // Note: Shell typically doesn't pass literal newlines in args, but we test the goal is preserved
-    const goal = "Line one\\nLine two";
-    const result = zagi(["agent", "plan", "--dry-run", goal], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain(`Initial context: ${goal}`);
-    expect(result).toContain(`INITIAL CONTEXT: ${goal}`);
-  });
-
-  test("handles long goal description", () => {
-    const longGoal = "Implement a comprehensive user authentication system with OAuth2 support, including Google, GitHub, and Microsoft providers, plus email/password fallback with rate limiting and account lockout protection";
-    const result = zagi(["agent", "plan", "--dry-run", longGoal], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain(`Initial context: ${longGoal}`);
-    expect(result).toContain(`INITIAL CONTEXT: ${longGoal}`);
-  });
-
-  test("handles goal with mixed special characters", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Add 'auth' with <JWT> & \"refresh\" tokens"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain("Initial context: Add 'auth' with <JWT> & \"refresh\" tokens");
-    expect(result).toContain("INITIAL CONTEXT: Add 'auth' with <JWT> & \"refresh\" tokens");
-  });
-
-  test("shows opencode executor when ZAGI_AGENT=opencode", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Test task"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "opencode" }
-    });
-
-    expect(result).toContain("Would execute:");
-    expect(result).toContain("opencode"); // No "run" subcommand for interactive mode
-  });
-
-  test("shows custom executor when ZAGI_AGENT_CMD is set", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Test task"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT_CMD: "aider --yes" }
-    });
-
-    expect(result).toContain("Would execute:");
-    expect(result).toContain("aider --yes");
-  });
-
-  test("uses claude as default executor", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "Test task"], {
-      cwd: REPO_DIR
-    });
-
-    expect(result).toContain("Would execute:");
-    expect(result).toContain("claude"); // No -p flag for interactive mode
-  });
-
-  test("goal with only whitespace shows error", () => {
-    const result = zagi(["agent", "plan", "--dry-run", "   "], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    // Whitespace-only is still valid input from the shell perspective
-    // The command treats it as valid content
-    expect(result).toContain("Initial context:");
-  });
-
-  test("--dry-run flag position after goal works", () => {
-    const result = zagi(["agent", "plan", "Build feature", "--dry-run"], {
-      cwd: REPO_DIR,
-      env: { ZAGI_AGENT: "claude" }
-    });
-
-    expect(result).toContain("Interactive Planning Session (dry-run)");
-    expect(result).toContain("Initial context: Build feature");
-  });
-});
 
 // ============================================================================
 // Error Handling

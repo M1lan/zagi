@@ -21,7 +21,8 @@ pub const help =
     \\
 ;
 
-pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
+pub fn run(allocator: std.mem.Allocator, args: [][:0]u8, format: git.OutputFormat) git.Error!void {
+    const use_json = format == .json;
     const stdout = std.fs.File.stdout().deprecatedWriter();
 
     // Parse arguments
@@ -71,9 +72,9 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
         return git.Error.UsageError;
     }
 
-    // Check if prompt is required (when running in agent mode)
-    if (detect.isAgentMode() and prompt == null) {
-        stdout.print("error: --prompt required in agent mode\n", .{}) catch {};
+    // Check if prompt is required (opt-in via ZAGI_REQUIRE_PROMPT_COMMIT=1)
+    if (std.posix.getenv("ZAGI_REQUIRE_PROMPT_COMMIT") != null and detect.isAgentMode() and prompt == null) {
+        stdout.print("error: --prompt required (ZAGI_REQUIRE_PROMPT_COMMIT is set)\n", .{}) catch {};
         stdout.print("hint: use --prompt to record the prompt that created this commit\n", .{}) catch {};
         return git.Error.UsageError;
     }
@@ -344,17 +345,27 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) git.Error!void {
     const stats = getDiffStats(allocator, repo, head_commit, tree) catch .{ .files = 0, .insertions = 0, .deletions = 0 };
 
     // Output
-    stdout.print("committed: {s} \"{s}\"\n", .{ hash_buf[0..7], final_message }) catch return git.Error.WriteFailed;
-    if (stats.files > 0) {
-        stdout.print("  {d} file{s}, +{d} -{d}\n", .{
+    if (use_json) {
+        stdout.print("{{\"hash\":\"{s}\",\"message\":\"{s}\",\"files\":{d},\"insertions\":{d},\"deletions\":{d}}}\n", .{
+            hash_buf[0..7],
+            final_message,
             stats.files,
-            if (stats.files == 1) "" else "s",
             stats.insertions,
             stats.deletions,
         }) catch return git.Error.WriteFailed;
-    }
-    if (prompt != null) {
-        stdout.print("  prompt saved\n", .{}) catch return git.Error.WriteFailed;
+    } else {
+        stdout.print("committed: {s} \"{s}\"\n", .{ hash_buf[0..7], final_message }) catch return git.Error.WriteFailed;
+        if (stats.files > 0) {
+            stdout.print("  {d} file{s}, +{d} -{d}\n", .{
+                stats.files,
+                if (stats.files == 1) "" else "s",
+                stats.insertions,
+                stats.deletions,
+            }) catch return git.Error.WriteFailed;
+        }
+        if (prompt != null) {
+            stdout.print("  prompt saved\n", .{}) catch return git.Error.WriteFailed;
+        }
     }
 }
 
