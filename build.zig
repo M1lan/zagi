@@ -102,6 +102,15 @@ pub fn build(b: *std.Build) void {
     });
     diff_tests.root_module.linkLibrary(libgit2_dep.artifact("git2"));
 
+    const hooks_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cmds/hooks.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    hooks_tests.root_module.linkLibrary(libgit2_dep.artifact("git2"));
+
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     const run_log_tests = b.addRunArtifact(log_tests);
     const run_git_tests = b.addRunArtifact(git_tests);
@@ -109,6 +118,7 @@ pub fn build(b: *std.Build) void {
     const run_add_tests = b.addRunArtifact(add_tests);
     const run_commit_tests = b.addRunArtifact(commit_tests);
     const run_diff_tests = b.addRunArtifact(diff_tests);
+    const run_hooks_tests = b.addRunArtifact(hooks_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
@@ -118,6 +128,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_add_tests.step);
     test_step.dependOn(&run_commit_tests.step);
     test_step.dependOn(&run_diff_tests.step);
+    test_step.dependOn(&run_hooks_tests.step);
 }
 
 fn getVersion(b: *std.Build) []const u8 {

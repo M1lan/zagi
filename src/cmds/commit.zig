@@ -1,6 +1,7 @@
 const std = @import("std");
 const git = @import("git.zig");
 const detect = @import("detect.zig");
+const hooks = @import("hooks.zig");
 const c = git.c;
 
 pub const help =
@@ -13,9 +14,15 @@ pub const help =
     \\  -a             Stage all modified tracked files before commit
     \\  --amend        Amend the previous commit
     \\  --prompt <p>   Store the complete user prompt that created this commit
+    \\  -n, --no-verify  Skip pre-commit and commit-msg hooks
+    \\
+    \\Hooks:
+    \\  Runs pre-commit, commit-msg, and post-commit hooks (like git),
+    \\  resolved from core.hooksPath or <gitdir>/hooks.
     \\
     \\Environment:
     \\  ZAGI_STRIP_COAUTHORS=1   Remove Co-Authored-By lines from message
+    \\  ZAGI_NO_VERIFY=1         Skip all hooks globally
     \\
     \\Agent mode requires --prompt when agent is detected.
     \\
@@ -30,6 +37,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8, format: git.OutputForma
     var amend = false;
     var all = false;
     var prompt: ?[]const u8 = null;
+    var no_verify = false;
 
     var i: usize = 2; // Skip "zagi" and "commit"
     while (i < args.len) : (i += 1) {
@@ -58,6 +66,8 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8, format: git.OutputForma
             prompt = std.mem.sliceTo(args[i], 0);
         } else if (std.mem.startsWith(u8, arg, "--prompt=")) {
             prompt = arg[9..];
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-verify")) {
+            no_verify = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             stdout.print("{s}", .{help}) catch {};
             return;
@@ -106,6 +116,21 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8, format: git.OutputForma
         }
         if (c.git_index_write(index) < 0) {
             return git.Error.IndexWriteFailed;
+        }
+    }
+
+    // pre-commit hook: validate the staged snapshot before building the commit.
+    if (!hooks.skip(no_verify)) {
+        switch (hooks.runHook(allocator, repo, "pre-commit", &.{})) {
+            .rejected => {
+                stdout.print("error: pre-commit hook rejected the commit\n", .{}) catch {};
+                stdout.print("hint: fix the reported issues, or use --no-verify to bypass\n", .{}) catch {};
+                return git.Error.CommitFailed;
+            },
+            else => {
+                // A hook may have restaged files; refresh the in-memory index.
+                _ = c.git_index_read(index, 1);
+            },
         }
     }
 
@@ -230,6 +255,43 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8, format: git.OutputForma
         final_message = stripped_message_buf[0..stripped_len];
     }
 
+    // commit-msg hook: lets hooks validate or rewrite the message file.
+    var msg_file_buf: [4096]u8 = undefined;
+    if (!hooks.skip(no_verify)) {
+        const gitdir = std.mem.sliceTo(c.git_repository_path(repo), 0);
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const msg_path = std.fmt.bufPrint(&path_buf, "{s}COMMIT_EDITMSG", .{gitdir}) catch null;
+        if (msg_path) |mp| {
+            const wrote = blk: {
+                const f = std.fs.createFileAbsolute(mp, .{ .truncate = true }) catch break :blk false;
+                defer f.close();
+                f.writeAll(final_message) catch break :blk false;
+                f.writeAll("\n") catch break :blk false;
+                break :blk true;
+            };
+            if (wrote) {
+                switch (hooks.runHook(allocator, repo, "commit-msg", &.{mp})) {
+                    .rejected => {
+                        stdout.print("error: commit-msg hook rejected the message\n", .{}) catch {};
+                        stdout.print("hint: fix the message, or use --no-verify to bypass\n", .{}) catch {};
+                        return git.Error.CommitFailed;
+                    },
+                    .ok => {
+                        // Re-read in case the hook rewrote the message.
+                        const f = std.fs.openFileAbsolute(mp, .{}) catch null;
+                        if (f) |file| {
+                            defer file.close();
+                            const len = file.readAll(&msg_file_buf) catch 0;
+                            const cleaned = hooks.cleanupMessage(msg_file_buf[0..len]);
+                            if (cleaned.len > 0) final_message = cleaned;
+                        }
+                    },
+                    .skipped => {},
+                }
+            }
+        }
+    }
+
     // Copy message to null-terminated buffer
     if (final_message.len >= message_buf.len) {
         return git.Error.CommitFailed;
@@ -335,6 +397,11 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8, format: git.OutputForma
                 }
             }
         }
+    }
+
+    // post-commit hook: best-effort, never blocks completion.
+    if (!hooks.skip(no_verify)) {
+        _ = hooks.runHook(allocator, repo, "post-commit", &.{});
     }
 
     // Format output
